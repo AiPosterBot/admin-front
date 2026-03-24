@@ -1,352 +1,365 @@
-import { useState } from "react";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Label } from "./ui/label";
-import { Badge } from "./ui/badge";
-import { Alert, AlertDescription } from "./ui/alert";
-import {
-  CheckCircle,
-  AlertCircle,
-  Copy,
-  Bot,
-  Loader2,
-  ArrowRight,
-  ExternalLink,
-  Radio,
-} from "lucide-react";
-import { Channel } from "../data/mock-data";
+import { useEffect, useMemo, useState } from 'react'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
+import { Button } from './ui/button'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
+import { Alert, AlertDescription } from './ui/alert'
+import { CheckCircle, AlertCircle, Bot, Loader2, ArrowRight, ExternalLink, Radio } from 'lucide-react'
+import type { Channel } from '../types/domain'
+import { useTeam } from '../context/TeamContext'
+import * as channelService from '../services/channelService'
 
-const BOT_NAME = "@ai_poster_bot";
-const BOT_USERNAME = "ai_poster_bot";
-
-// Нормализация ввода канала
-function normalizeChannelInput(input: string): { id: string; display: string } | null {
-  const s = input.trim();
-  if (!s) return null;
-
-  // Уже с @
-  if (s.startsWith("@")) {
-    const username = s.slice(1);
-    return { id: `@${username}`, display: `@${username}` };
-  }
-
-  // https://t.me/channelname или t.me/channelname
-  const tmeMatch = s.match(/(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]+)/i);
-  if (tmeMatch) {
-    return { id: `@${tmeMatch[1]}`, display: `@${tmeMatch[1]}` };
-  }
-
-  // Просто username без @
-  if (/^[a-zA-Z0-9_]{5,}$/.test(s)) {
-    return { id: `@${s}`, display: `@${s}` };
-  }
-
-  // Числовой ID канала
-  if (/^-?\d+$/.test(s)) {
-    return { id: s, display: s };
-  }
-
-  return null;
+function isNumericTelegramTarget(value: string) {
+  return /^-?\d+$/.test(value.trim())
 }
 
-type Step = "input" | "verify" | "done";
-type VerifyStatus = "idle" | "checking" | "success" | "error";
+function normalizeChannelInput(input: string): { id: string; display: string } | null {
+  const normalizedInput = input.trim()
+  if (!normalizedInput) {
+    return null
+  }
+
+  if (isNumericTelegramTarget(normalizedInput)) {
+    return { id: normalizedInput, display: normalizedInput }
+  }
+
+  if (normalizedInput.startsWith('@')) {
+    const username = normalizedInput.slice(1).trim()
+    if (!username) {
+      return null
+    }
+
+    if (isNumericTelegramTarget(username)) {
+      return { id: username, display: username }
+    }
+
+    return { id: `@${username}`, display: `@${username}` }
+  }
+
+  const tmeMatch = normalizedInput.match(/(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]+)/i)
+  if (tmeMatch) {
+    const pathPart = tmeMatch[1].trim()
+    if (isNumericTelegramTarget(pathPart)) {
+      return { id: pathPart, display: pathPart }
+    }
+
+    return { id: `@${pathPart}`, display: `@${pathPart}` }
+  }
+
+  if (/^[a-zA-Z0-9_]{5,}$/.test(normalizedInput)) {
+    return { id: `@${normalizedInput}`, display: `@${normalizedInput}` }
+  }
+
+  return null
+}
+
+type Step = 'input' | 'verify' | 'done'
+type VerifyStatus = 'idle' | 'checking' | 'success' | 'error'
 
 interface AddChannelDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onCreated: (channel: Omit<Channel, "id" | "createdAt" | "teamId">) => void;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onCreated: (channel: Omit<Channel, 'id' | 'createdAt' | 'teamId'>) => void
 }
 
 export function AddChannelDialog({ open, onOpenChange, onCreated }: AddChannelDialogProps) {
-  const [step, setStep] = useState<Step>("input");
-  const [channelInput, setChannelInput] = useState("");
-  const [normalizedChannel, setNormalizedChannel] = useState<{ id: string; display: string } | null>(null);
-  const [inputError, setInputError] = useState("");
-  const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>("idle");
-  const [verifyError, setVerifyError] = useState("");
-  const [copied, setCopied] = useState(false);
+  const { currentTeamId } = useTeam()
+  const [step, setStep] = useState<Step>('input')
+  const [channelInput, setChannelInput] = useState('')
+  const [normalizedChannel, setNormalizedChannel] = useState<{ id: string; display: string } | null>(null)
+  const [inputError, setInputError] = useState('')
+  const [verifyStatus, setVerifyStatus] = useState<VerifyStatus>('idle')
+  const [verifyError, setVerifyError] = useState('')
+  const [botUsername, setBotUsername] = useState<string | null>(null)
 
   const handleReset = () => {
-    setStep("input");
-    setChannelInput("");
-    setNormalizedChannel(null);
-    setInputError("");
-    setVerifyStatus("idle");
-    setVerifyError("");
-    setCopied(false);
-  };
+    setStep('input')
+    setChannelInput('')
+    setNormalizedChannel(null)
+    setInputError('')
+    setVerifyStatus('idle')
+    setVerifyError('')
+    setBotUsername(null)
+  }
+
+  useEffect(() => {
+    if (!open || !currentTeamId) {
+      return
+    }
+
+    let isMounted = true
+    void channelService
+      .getTelegramBotInfo(currentTeamId)
+      .then((result) => {
+        if (isMounted) {
+          setBotUsername(result.botUsername ?? null)
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setBotUsername(null)
+        }
+      })
+
+    return () => {
+      isMounted = false
+    }
+  }, [currentTeamId, open])
+
+  const botName = useMemo(() => (botUsername ? `@${botUsername}` : 'бот'), [botUsername])
+  const botLink = useMemo(() => (botUsername ? `https://t.me/${botUsername}` : null), [botUsername])
+  const isNumericChannelId = useMemo(() => isNumericTelegramTarget(normalizedChannel?.id ?? ''), [normalizedChannel?.id])
 
   const handleClose = () => {
-    onOpenChange(false);
-    setTimeout(handleReset, 300);
-  };
+    onOpenChange(false)
+    setTimeout(handleReset, 300)
+  }
 
   const handleNext = () => {
-    const parsed = normalizeChannelInput(channelInput);
+    const parsed = normalizeChannelInput(channelInput)
     if (!parsed) {
-      setInputError(
-        "Неверный формат. Введите @username, t.me/username или числовой ID канала."
-      );
-      return;
+      setInputError('Неверный формат. Введите @username, t.me/username, ссылку https://t.me/... или числовой ID канала. Для numeric id префикс -100 можно не добавлять.')
+      return
     }
-    setInputError("");
-    setNormalizedChannel(parsed);
-    setStep("verify");
-    setVerifyStatus("idle");
-  };
 
-  const handleCopyBotName = async () => {
-    try {
-      await navigator.clipboard.writeText(BOT_NAME);
-    } catch {
-      const ta = document.createElement("textarea");
-      ta.value = BOT_NAME;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
+    setInputError('')
+    setNormalizedChannel(parsed)
+    setStep('verify')
+    setVerifyStatus('idle')
+    setVerifyError('')
+  }
 
   const handleVerify = async () => {
-    setVerifyStatus("checking");
-    setVerifyError("");
-
-    // Симуляция проверки: 1.5 секунды задержки, потом успех
-    await new Promise(r => setTimeout(r, 1500));
-
-    // В реальности — API запрос. Для демо: симулируем успех
-    const isError = channelInput.includes("bad") || channelInput.includes("fail");
-    if (isError) {
-      setVerifyStatus("error");
-      setVerifyError(
-        `Бот ${BOT_NAME} не найден в канале ${normalizedChannel?.display} или не является администратором. Убедитесь, что вы добавили бота в канал и дали ему права на отправку сообщений.`
-      );
-    } else {
-      setVerifyStatus("success");
-      setStep("done");
+    if (!normalizedChannel || !currentTeamId) {
+      setVerifyStatus('error')
+      setVerifyError('Не выбрана команда для добавления канала.')
+      return
     }
-  };
+
+    setVerifyStatus('checking')
+    setVerifyError('')
+
+    try {
+      const result = await channelService.checkChannelAccess(currentTeamId, normalizedChannel.id)
+      if (!result.botCanPost) {
+        setVerifyStatus('error')
+        setVerifyError(`${botName} найден, но не может публиковать в ${normalizedChannel.display}. Проверьте права администратора.`)
+        return
+      }
+
+      setVerifyStatus('success')
+      setStep('done')
+    } catch (error) {
+      setVerifyStatus('error')
+      setVerifyError(
+        error instanceof Error
+          ? error.message
+          : `Не удалось проверить канал ${normalizedChannel.display}. Убедитесь, что ${botName} добавлен и назначен администратором.`,
+      )
+    }
+  }
 
   const handleCreate = () => {
-    if (!normalizedChannel) return;
-    const channelName = normalizedChannel.display.replace("@", "");
+    if (!normalizedChannel) {
+      return
+    }
+
+    const channelName = normalizedChannel.display.replace('@', '')
     onCreated({
       name: channelName.charAt(0).toUpperCase() + channelName.slice(1),
-      telegramId: normalizedChannel.display,
-      isActive: true,
+      telegramTarget: normalizedChannel.display,
+      isActive: false,
       botCanPost: true,
-      publishMode: "instant",
-      contentStrategy: "newest",   // ЗАМЕНЯЕТ mainPrompt — дефолтная стратегия
+      publishMode: 'periodic',
+      publishIntervalSec: 1800,
+      contentStrategy: 'newest',
       linkedSourcesCount: 0,
       subscribersCount: 0,
-    });
-    handleClose();
-  };
+    })
+    handleClose()
+  }
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="sm:max-w-[500px]">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Radio className="size-5 text-blue-600" />
-            {step === "input" && "Добавить Telegram-канал"}
-            {step === "verify" && "Подключение бота"}
-            {step === "done" && "Канал подключён!"}
+        <DialogHeader className="-mx-6 -mt-6 mb-4 border-b border-sky-100 bg-gradient-to-r from-sky-50 via-white to-indigo-50 px-6 pt-6 pb-4 dark:border-sky-500/25 dark:from-sky-500/15 dark:via-slate-950 dark:to-indigo-500/15">
+          <DialogTitle className="flex items-center gap-2 text-gray-900 dark:text-gray-100">
+            <span className="flex size-9 items-center justify-center rounded-xl bg-white/75 text-blue-600 shadow-sm dark:bg-slate-950/40 dark:text-sky-300"><Radio className="size-5" /></span>
+            {step === 'input' && 'Добавить Telegram-канал'}
+            {step === 'verify' && 'Подключение бота'}
+            {step === 'done' && 'Канал подключен'}
           </DialogTitle>
-          <DialogDescription>
-            {step === "input" && "Введите ссылку или username вашего Telegram-канала"}
-            {step === "verify" && `Добавьте бота ${BOT_NAME} в канал ${normalizedChannel?.display}`}
-            {step === "done" && `Канал ${normalizedChannel?.display} успешно добавлен`}
+          <DialogDescription className="text-gray-600 dark:text-gray-300">
+            {step === 'input' && 'Введите ссылку, username или ID вашего Telegram-канала'}
+            {step === 'verify' && `Добавьте ${botName} в канал ${normalizedChannel?.display}`}
+            {step === 'done' && `Канал ${normalizedChannel?.display} успешно подготовлен к публикации`}
           </DialogDescription>
         </DialogHeader>
 
-        {/* Step indicators */}
-        <div className="flex items-center gap-2 mb-2">
-          {["input", "verify", "done"].map((s, idx) => (
-            <div key={s} className="flex items-center gap-2">
-              <div
-                className={`size-6 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
-                  step === s
-                    ? "bg-blue-600 text-white"
-                    : idx < ["input", "verify", "done"].indexOf(step)
-                    ? "bg-green-500 text-white"
-                    : "bg-gray-100 text-gray-400"
-                }`}
-              >
-                {idx < ["input", "verify", "done"].indexOf(step) ? (
-                  <CheckCircle className="size-3.5" />
-                ) : (
-                  idx + 1
-                )}
-              </div>
-              {idx < 2 && (
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          {['input', 'verify', 'done'].map((currentStep, index) => {
+            const activeIndex = ['input', 'verify', 'done'].indexOf(step)
+            const stepIndex = ['input', 'verify', 'done'].indexOf(currentStep)
+            const isCompleted = stepIndex < activeIndex
+            const isActive = currentStep === step
+
+            return (
+              <div key={currentStep} className="flex items-center gap-2">
                 <div
-                  className={`h-0.5 w-8 transition-colors ${
-                    idx < ["input", "verify", "done"].indexOf(step)
-                      ? "bg-green-500"
-                      : "bg-gray-200"
+                  className={`flex size-6 items-center justify-center rounded-full text-xs font-bold transition-colors ${
+                    isActive
+                      ? 'bg-primary text-primary-foreground'
+                      : isCompleted
+                        ? 'bg-green-500 text-white dark:bg-green-500/80'
+                        : 'bg-muted text-muted-foreground'
                   }`}
-                />
-              )}
-            </div>
-          ))}
-          <span className="text-xs text-gray-400 ml-2">
-            {step === "input" ? "Ввод канала" : step === "verify" ? "Проверка бота" : "Готово"}
+                >
+                  {isCompleted ? <CheckCircle className="size-3.5" /> : index + 1}
+                </div>
+                {index < 2 ? <div className={`h-0.5 w-8 transition-colors ${isCompleted ? 'bg-green-500 dark:bg-green-500/80' : 'bg-border'}`} /> : null}
+              </div>
+            )
+          })}
+          <span className="basis-full text-xs text-muted-foreground sm:ml-2 sm:basis-auto">
+            {step === 'input' ? 'Ввод канала' : step === 'verify' ? 'Проверка бота' : 'Готово'}
           </span>
         </div>
 
-        {/* Step 1: Input */}
-        {step === "input" && (
+        {step === 'input' ? (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="channel-url" className="mb-2 block">
-                Канал (ссылка или username)
-              </Label>
+              <Label htmlFor="channel-url" className="mb-2 block">Канал</Label>
               <Input
                 id="channel-url"
                 placeholder="@mychannel или https://t.me/mychannel"
                 value={channelInput}
-                onChange={e => {
-                  setChannelInput(e.target.value);
-                  setInputError("");
+                onChange={(event) => {
+                  setChannelInput(event.target.value)
+                  setInputError('')
                 }}
-                onKeyDown={e => {
-                  if (e.key === "Enter" && channelInput.trim()) handleNext();
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && channelInput.trim()) {
+                    handleNext()
+                  }
                 }}
                 autoFocus
-                className={inputError ? "border-red-400" : ""}
+                className={inputError ? 'border-red-400' : ''}
               />
               {inputError ? (
                 <p className="text-xs text-red-500">{inputError}</p>
               ) : (
-                <p className="text-xs text-gray-400">
-                  Принимается: @channel, t.me/channel, https://t.me/channel или числовой ID
-                </p>
+                <p className="text-xs text-muted-foreground">Поддерживается формат: @channel, t.me/channel, https://t.me/channel и числовой ID канала. Для numeric id префикс -100 можно не добавлять.</p>
               )}
             </div>
 
-            <div className="flex justify-end gap-2">
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
               <Button variant="outline" onClick={handleClose}>Отмена</Button>
-              <Button onClick={handleNext} disabled={!channelInput.trim()}>
-                Далее <ArrowRight className="size-4 ml-1.5" />
+              <Button onClick={handleNext} disabled={!channelInput.trim()} className="w-full sm:w-auto">
+                Далее <ArrowRight className="ml-1.5 size-4" />
               </Button>
             </div>
           </div>
-        )}
+        ) : null}
 
-        {/* Step 2: Verify bot */}
-        {step === "verify" && (
+        {step === 'verify' ? (
           <div className="space-y-4">
-            {/* Instructions */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-              <div className="font-medium text-blue-900 text-sm">
-                Подключите бота к каналу — 4 простых шага:
-              </div>
-              <ol className="space-y-3 text-sm text-blue-800">
+            <div className="space-y-3 rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-800/40 dark:bg-blue-950/20">
+              <div className="text-sm font-medium text-blue-900 dark:text-blue-200">Подключите бота к каналу за 4 шага:</div>
+              <ol className="space-y-3 text-sm text-blue-800 dark:text-blue-100">
                 <li className="flex items-start gap-2.5">
-                  <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">1</span>
+                  <span className="mt-0.5 flex size-5 flex-shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-900/50 dark:text-blue-200">1</span>
                   <span>
-                    Перейдите в ваш канал{" "}
-                    <a
-                      href={`https://t.me/${normalizedChannel?.display.replace("@", "")}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="font-semibold underline underline-offset-2 hover:text-blue-600 transition-colors"
-                    >
-                      {normalizedChannel?.display}
-                    </a>{" "}
-                    и откройте его настройки
+                    {isNumericChannelId ? (
+                      <>
+                        Откройте нужный приватный канал в Telegram. Вы указали chat id{' '}
+                        <span className="font-semibold">{normalizedChannel?.display}</span>.
+                      </>
+                    ) : (
+                      <>
+                        Откройте настройки канала{' '}
+                        <a
+                          href={`https://t.me/${normalizedChannel?.display.replace('@', '')}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="font-semibold underline underline-offset-2 transition-colors hover:text-blue-600 dark:hover:text-blue-300"
+                        >
+                          {normalizedChannel?.display}
+                        </a>
+                      </>
+                    )}
                   </span>
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">2</span>
+                  <span className="mt-0.5 flex size-5 flex-shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-900/50 dark:text-blue-200">2</span>
                   <span>
-                    Добавьте нашего бота{" "}
-                    <a
-                      href={`https://t.me/${BOT_USERNAME}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 font-semibold underline underline-offset-2 hover:text-blue-600 transition-colors"
-                    >
-                      <Bot className="size-3.5" />
-                      {BOT_NAME}
-                    </a>{" "}
+                    Добавьте нашего бота{' '}
+                    {botLink ? (
+                      <a
+                        href={botLink}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 font-semibold underline underline-offset-2 transition-colors hover:text-blue-600 dark:hover:text-blue-300"
+                      >
+                        <Bot className="size-3.5" />
+                        {botName}
+                      </a>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 font-semibold">
+                        <Bot className="size-3.5" />
+                        {botName}
+                      </span>
+                    )}{' '}
                     в участники канала
                   </span>
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">3</span>
-                  <span>
-                    В разделе <strong>Администраторы</strong> назначьте бота администратором канала
-                  </span>
+                  <span className="mt-0.5 flex size-5 flex-shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-900/50 dark:text-blue-200">3</span>
+                  <span>В разделе <strong>Администраторы</strong> назначьте бота администратором канала.</span>
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">4</span>
-                  <div>
-                    Дайте боту все права,{" "}<strong>кроме</strong>{" "}
-                    <span className="inline-flex items-center gap-1 bg-red-100 text-red-700 rounded px-1.5 py-0.5 text-xs font-medium">
-                      «Добавление новых администраторов»
-                    </span>
-                  </div>
+                  <span className="mt-0.5 flex size-5 flex-shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-900/50 dark:text-blue-200">4</span>
+                  <span>Дайте боту все нужные права, кроме разрешения на добавление новых администраторов.</span>
                 </li>
               </ol>
             </div>
 
-            {/* Error state */}
-            {verifyStatus === "error" && (
+            {verifyStatus === 'error' ? (
               <Alert variant="destructive">
                 <AlertCircle className="size-4" />
                 <AlertDescription className="text-sm">{verifyError}</AlertDescription>
               </Alert>
-            )}
+            ) : null}
 
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-between">
               <Button
                 variant="ghost"
+                className="w-full sm:w-auto"
                 onClick={() => {
-                  setStep("input");
-                  setVerifyStatus("idle");
-                  setVerifyError("");
+                  setStep('input')
+                  setVerifyStatus('idle')
+                  setVerifyError('')
                 }}
               >
-                ← Назад
+                Назад
               </Button>
-              <div className="flex gap-2">
-                <a
-                  href={`https://t.me/${BOT_USERNAME}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <Button variant="outline">
-                    <ExternalLink className="size-3.5 mr-1.5" />
-                    Открыть бота
-                  </Button>
-                </a>
-                <Button
-                  onClick={handleVerify}
-                  disabled={verifyStatus === "checking"}
-                >
-                  {verifyStatus === "checking" ? (
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
+                {botLink ? (
+                  <a href={botLink} target="_blank" rel="noopener noreferrer" className="w-full sm:w-auto">
+                    <Button variant="outline" className="w-full sm:w-auto">
+                      <ExternalLink className="mr-1.5 size-3.5" />
+                      Открыть бота
+                    </Button>
+                  </a>
+                ) : null}
+                <Button onClick={handleVerify} disabled={verifyStatus === 'checking'} className="w-full sm:w-auto">
+                  {verifyStatus === 'checking' ? (
                     <>
-                      <Loader2 className="size-4 mr-2 animate-spin" />
+                      <Loader2 className="mr-2 size-4 animate-spin" />
                       Проверяем...
                     </>
                   ) : (
                     <>
-                      <CheckCircle className="size-4 mr-2" />
+                      <CheckCircle className="mr-2 size-4" />
                       Проверить доступ
                     </>
                   )}
@@ -354,37 +367,32 @@ export function AddChannelDialog({ open, onOpenChange, onCreated }: AddChannelDi
               </div>
             </div>
           </div>
-        )}
+        ) : null}
 
-        {/* Step 3: Done */}
-        {step === "done" && (
+        {step === 'done' ? (
           <div className="space-y-4">
-            <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-              <CheckCircle className="size-10 text-green-500 mx-auto mb-2" />
-              <div className="font-medium text-green-900">Бот успешно подключён!</div>
-              <div className="text-sm text-green-700 mt-1">
-                Канал <strong>{normalizedChannel?.display}</strong> готов к публикации
-              </div>
+            <div className="rounded-lg border border-green-200 bg-green-50 p-4 text-center dark:border-green-800/40 dark:bg-green-950/20">
+              <CheckCircle className="mx-auto mb-2 size-10 text-green-500 dark:text-green-400" />
+              <div className="font-medium text-green-900 dark:text-green-200">Бот успешно подключен</div>
+              <div className="mt-1 text-sm text-green-700 dark:text-green-300">Канал <strong>{normalizedChannel?.display}</strong> готов к публикации.</div>
             </div>
 
-            <div className="text-sm text-gray-600 bg-gray-50 rounded-lg p-3">
-              <p className="font-medium mb-1">Следующие шаги:</p>
-              <ul className="space-y-1 text-gray-500 text-xs">
-                <li>• Настройте промпт для канала</li>
-                <li>• Привяжите источники контента</li>
-                <li>• Выберите режим публикации (instant или schedule)</li>
+            <div className="rounded-lg bg-muted/40 p-3 text-sm text-muted-foreground">
+              <p className="mb-1 font-medium">Следующие шаги:</p>
+              <ul className="space-y-1 text-xs text-muted-foreground">
+                <li>• настройте стратегию публикации для канала;</li>
+                <li>• привяжите источники контента;</li>
+                <li>• выберите режим публикации: periodic, scheduled или every_material.</li>
               </ul>
             </div>
 
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={handleClose}>Добавить ещё</Button>
-              <Button onClick={handleCreate}>
-                Открыть канал →
-              </Button>
+              <Button variant="outline" onClick={handleClose}>Закрыть</Button>
+              <Button onClick={handleCreate}>Сохранить канал</Button>
             </div>
           </div>
-        )}
+        ) : null}
       </DialogContent>
     </Dialog>
-  );
+  )
 }

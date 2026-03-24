@@ -1,269 +1,282 @@
-import { useState } from "react";
-import { useNavigate } from "react-router";
-import { toast } from "sonner";
-import { Plus, Radio, Filter, CheckCircle, XCircle, AlertCircle, Tag, Loader2 } from "lucide-react";
-import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "../components/ui/table";
-import { AddChannelDialog } from "../components/AddChannelDialog";
-import { Pagination, usePagination } from "../components/Pagination";
-import { type Channel } from "../data/mock-data";
-import { useTeam } from "../context/TeamContext";
-// ── Service layer ────────────────────────────────────────────────────
-import { useTeamChannels } from "../hooks/useTeamChannels";
-import * as channelService from "../services/channelService";
-import * as postService from "../services/postService";
-import * as teamService from "../services/teamService";
-import { TagBadge } from "../components/TagBadge";
-import { TagFilter } from "../components/TagFilter";
-import { ManageTagsDialog } from "../components/ManageTagsDialog";
+import type { ReactNode } from 'react'
+import { useState } from 'react'
+import { useNavigate } from 'react-router'
+import { toast } from 'sonner'
+import { AlertCircle, CheckCircle, Filter, Loader2, Plus, Radio, Tag, XCircle } from 'lucide-react'
 
-const PAGE_SIZE = 10;
-type StatusFilter = "all" | "active" | "inactive" | "error";
+import { AddChannelDialog } from '../components/AddChannelDialog'
+import { ManageTagsDialog } from '../components/ManageTagsDialog'
+import { Pagination } from '../components/Pagination'
+import { TagBadge } from '../components/TagBadge'
+import { TagFilter } from '../components/TagFilter'
+import { Badge } from '../components/ui/badge'
+import { Button } from '../components/ui/button'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { useTeam } from '../context/TeamContext'
+import type { Channel } from '../types/domain'
+import { useTeamChannels } from '../hooks/useTeamChannels'
+import * as channelService from '../services/channelService'
+
+const PAGE_SIZE = 10
+
+type StatusFilter = 'all' | 'active' | 'inactive' | 'error'
 
 export function TeamChannelsPage() {
-  const { currentTeamId } = useTeam();
-  const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
+  const { currentTeam, currentTeamId } = useTeam()
+  const navigate = useNavigate()
+  const team = currentTeam
 
-  // ── Реактивный список через сервис ───────────────────────────────
-  const { state: channelsState, invalidate } = useTeamChannels();
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [page, setPage] = useState(1)
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([])
+  const [manageTagsOpen, setManageTagsOpen] = useState(false)
 
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [page, setPage] = useState(1);
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
-  const [manageTagsOpen, setManageTagsOpen] = useState(false);
+  const { state: channelsState, invalidate } = useTeamChannels({
+    page,
+    limit: PAGE_SIZE,
+    status: statusFilter,
+    tagIds: selectedTagIds,
+  })
 
-  const teamTags = channelService.getTeamChannelTags(currentTeamId ?? "");
+  const teamTags = channelService.getTeamChannelTags(currentTeamId ?? '')
 
   if (!team) {
     return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Команда не выбрана</h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-foreground">Команда не выбрана</h2>
+        <p className="text-muted-foreground">Выберите команду в верхнем меню</p>
       </div>
-    );
+    )
   }
 
-  if (channelsState.status === "loading" || channelsState.status === "idle") {
+  if (channelsState.status === 'loading' || channelsState.status === 'idle') {
     return (
       <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-6 animate-spin text-gray-400" />
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
-    );
+    )
   }
 
-  const channels = channelsState.status === "success" ? channelsState.data : [];
+  if (channelsState.status === 'error') {
+    return <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-6 text-sm text-destructive">{channelsState.error}</div>
+  }
 
-  const handleFilterChange = (f: StatusFilter) => { setStatusFilter(f); setPage(1); };
-  const handleTagFilterChange = (ids: string[]) => { setSelectedTagIds(ids); setPage(1); };
+  if (channelsState.status === 'empty') {
+    return <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground">Каналы не найдены.</div>
+  }
 
-  const handleChannelCreated = async (data: Omit<Channel, "id" | "createdAt" | "teamId">) => {
+  const channelsResult = channelsState.data
+  const channels = channelsResult.data
+  const totalItems = channelsResult.total
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE))
+  const statusCounts = channelsResult.facets?.statusCounts ?? { all: totalItems, active: 0, inactive: 0, error: 0 }
+  const hasActiveFilters = statusFilter !== 'all' || selectedTagIds.length > 0
+
+  const handleChannelCreated = async (data: Omit<Channel, 'id' | 'createdAt' | 'teamId'>) => {
     const result = await channelService.createChannel(currentTeamId!, {
       name: data.name,
-      telegramId: data.telegramId,
-    });
-    if (!result.ok) { toast.error(result.error); return; }
-    invalidate();
-    toast.success(`Канал "${result.data.name}" добавлен`);
-    navigate(`/channels/${result.data.id}`);
-  };
+      telegramTarget: data.telegramTarget,
+      isActive: data.isActive,
+    })
 
-  const handleDeleteChannel = async (channelId: string) => {
-    const ch = channels.find(c => c.id === channelId);
-    await channelService.deleteChannel(channelId, currentTeamId!);
-    invalidate();
-    toast.success(`Канал "${ch?.name ?? ""}" удалён`);
-  };
+    if (result.ok === false) {
+      toast.error(result.error)
+      return
+    }
 
-  const todayStr = new Date().toISOString().split("T")[0];
-  const postsTodayByChannel = (channelId: string) =>
-    postService.getPostsByChannelId(channelId).filter(
-      p => p.status === "success" && p.postedAt.startsWith(todayStr)
-    ).length;
+    invalidate()
+    toast.success(`Канал "${result.data.name}" добавлен`)
+    navigate(`/channels/${result.data.id}`)
+  }
 
-  const filtered =
-    (statusFilter === "all"      ? channels :
-     statusFilter === "active"   ? channels.filter(c => c.isActive && !c.lastError) :
-     statusFilter === "inactive" ? channels.filter(c => !c.isActive) :
-                                   channels.filter(c => !!c.lastError))
-    .filter(c => {
-      if (selectedTagIds.length === 0) return true;
-      const cTags = channelService.getChannelTagsById(c.id);
-      return cTags.some(t => selectedTagIds.includes(t.id));
-    });
-
-  const { totalPages, paginate, totalItems } = usePagination(filtered, PAGE_SIZE);
-  const pageChannels = paginate(page);
-
-  const filterOptions: { value: StatusFilter; label: string; count: number; icon?: React.ReactNode }[] = [
-    { value: "all",      label: "Все",         count: channels.length },
-    { value: "active",   label: "Активные",    count: channels.filter(c => c.isActive && !c.lastError).length, icon: <CheckCircle className="size-3.5 text-green-500" /> },
-    { value: "inactive", label: "Выключенные", count: channels.filter(c => !c.isActive).length,                icon: <XCircle className="size-3.5 text-gray-400" /> },
-    { value: "error",    label: "С ошибкой",   count: channels.filter(c => !!c.lastError).length,              icon: <AlertCircle className="size-3.5 text-red-500" /> },
-  ];
+  const filterOptions: Array<{ value: StatusFilter; label: string; count: number; icon?: ReactNode }> = [
+    { value: 'all', label: 'Все', count: statusCounts.all },
+    { value: 'active', label: 'Активные', count: statusCounts.active, icon: <CheckCircle className="size-3.5 text-green-500" /> },
+    { value: 'inactive', label: 'Выключенные', count: statusCounts.inactive, icon: <XCircle className="size-3.5 text-muted-foreground" /> },
+    { value: 'error', label: 'С ошибкой', count: statusCounts.error, icon: <AlertCircle className="size-3.5 text-red-500" /> },
+  ]
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start sm:items-center justify-between gap-3 flex-wrap">
+      <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-r from-sky-500/10 via-background to-indigo-500/10 p-5 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Каналы</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            {team.name} · {channels.length} каналов
+          <h1 className="text-2xl font-bold text-foreground">Каналы</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {team.name} · {totalItems} каналов
+          </p>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Здесь вы управляете каналами, публикующими контент в Telegram.
           </p>
         </div>
         <Button onClick={() => setIsAddDialogOpen(true)} className="w-full sm:w-auto">
-          <Plus className="size-4 mr-2" />
+          <Plus className="mr-2 size-4" />
           Добавить канал
         </Button>
       </div>
+      </div>
 
-      {/* Filter bar */}
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2 overflow-x-auto flex-wrap">
-          <Filter className="size-3.5 text-gray-400 shrink-0" />
-          <div className="flex items-center gap-1 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-wrap items-center gap-2 overflow-x-auto">
+          <Filter className="size-3.5 shrink-0 text-muted-foreground" />
+          <div className="flex flex-wrap items-center gap-1">
             {filterOptions.map(({ value, label, count, icon }) => (
               <button
                 key={value}
-                onClick={() => handleFilterChange(value)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                onClick={() => {
+                  setStatusFilter(value)
+                  setPage(1)
+                }}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
                   statusFilter === value
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                    ? 'bg-foreground text-background shadow-sm'
+                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 }`}
               >
                 {icon}
                 {label}
-                <span className={`text-xs tabular-nums ${statusFilter === value ? "text-white/50" : "text-gray-400"}`}>
-                  {count}
-                </span>
+                <span className={`text-xs tabular-nums ${statusFilter === value ? 'opacity-70' : 'text-muted-foreground'}`}>{count}</span>
               </button>
             ))}
           </div>
-          <div className="h-5 w-px bg-gray-200 hidden sm:block" />
+          <div className="hidden h-5 w-px bg-border sm:block" />
           <TagFilter
             tags={teamTags}
             selectedTagIds={selectedTagIds}
-            onChange={handleTagFilterChange}
+            onChange={(ids) => {
+              setSelectedTagIds(ids)
+              setPage(1)
+            }}
           />
           <button
             onClick={() => setManageTagsOpen(true)}
-            className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors px-2 py-1.5 rounded-md hover:bg-gray-50"
+            className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title="Управление тегами"
           >
             <Tag className="size-3.5" />
           </button>
         </div>
-        {(statusFilter !== "all" || selectedTagIds.length > 0) && (
+
+        {hasActiveFilters && (
           <button
-            onClick={() => { handleFilterChange("all"); setSelectedTagIds([]); }}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+            onClick={() => {
+              setStatusFilter('all')
+              setSelectedTagIds([])
+              setPage(1)
+            }}
+            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
             Сбросить
           </button>
         )}
       </div>
 
-      {/* Mobile cards */}
-      <div className="md:hidden space-y-3">
-        {pageChannels.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            <Radio className="size-8 text-gray-300 mx-auto mb-3" />
-            <div className="font-medium">
-              {channels.length === 0 ? "Каналов пока нет" : "Нет каналов с выбранным фильтром"}
-            </div>
-            {channels.length === 0 && (
+      <div className="space-y-3 md:hidden">
+        {channels.length === 0 ? (
+          <div className="py-12 text-center text-muted-foreground">
+            <Radio className="mx-auto mb-3 size-8 text-muted-foreground" />
+            <div className="font-medium">{hasActiveFilters ? 'Нет каналов с выбранным фильтром' : 'Каналов пока нет'}</div>
+            {!hasActiveFilters && (
               <Button className="mt-4" onClick={() => setIsAddDialogOpen(true)}>
-                <Plus className="size-4 mr-2" />
+                <Plus className="mr-2 size-4" />
                 Добавить канал
               </Button>
             )}
           </div>
         ) : (
-          pageChannels.map((channel) => (
+          channels.map((channel) => (
             <div
               key={channel.id}
-              className="bg-white rounded-lg border p-4 active:bg-gray-50 transition-colors cursor-pointer"
+              className="cursor-pointer rounded-lg border border-border bg-card p-4 text-card-foreground transition-colors hover:bg-muted/40 active:bg-muted/60"
               onClick={() => navigate(`/channels/${channel.id}`)}
             >
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className={`size-2.5 rounded-full flex-shrink-0 mt-1 ${
-                    channel.lastError ? "bg-red-500" : channel.isActive ? "bg-green-500" : "bg-gray-300"
-                  }`} />
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <div
+                    className={`mt-1 size-2.5 flex-shrink-0 rounded-full ${
+                      channel.lastError ? 'bg-red-500' : channel.isActive ? 'bg-green-500' : 'bg-muted-foreground/40'
+                    }`}
+                  />
                   <div className="min-w-0">
-                    <div className="font-medium text-gray-900 truncate">{channel.name}</div>
-                    <a
-                      href={`https://t.me/${channel.telegramId.replace("@", "")}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-blue-500 hover:text-blue-600"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {channel.telegramId}
-                    </a>
+                    <div className="truncate font-medium text-foreground">{channel.name}</div>
+                    {channelService.getChannelPublicUrl(channel) ? (
+                      <a
+                        href={channelService.getChannelPublicUrl(channel)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-primary transition-colors hover:text-primary/80"
+                        onClick={(event) => event.stopPropagation()}
+                      >
+                        {channelService.getChannelDisplayLabel(channel)}
+                      </a>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">{channelService.getChannelDisplayLabel(channel)}</div>
+                    )}
+                    <div className="text-[11px] text-muted-foreground/80">ID: {channelService.getChannelTechnicalId(channel)}</div>
                   </div>
                 </div>
-                <Badge variant={channel.publishMode === "instant" ? "default" : "secondary"} className="text-xs shrink-0">
-                  {channel.publishMode === "instant" ? "Мгновенный" : "По расписанию"}
+                <Badge
+                  variant={channel.publishMode === 'scheduled' ? 'secondary' : channel.publishMode === 'every_material' ? 'outline' : 'default'}
+                  className="shrink-0 text-xs"
+                >
+                  {channelService.getChannelPublishModeLabel(channel.publishMode)}
                 </Badge>
               </div>
-              <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
+
+              <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
                 {channel.lastError ? (
-                  <span className="text-red-600 flex items-center gap-1"><AlertCircle className="size-3" /> Ошибка</span>
+                  <span className="flex items-center gap-1 text-red-600">
+                    <AlertCircle className="size-3" />
+                    Ошибка
+                  </span>
                 ) : !channel.isActive ? (
-                  <span className="text-gray-400">Выключен</span>
+                  <span className="text-muted-foreground/80">Выключен</span>
                 ) : (
                   <span className="text-green-600">Активен</span>
                 )}
-                <span>Сегодня: {postsTodayByChannel(channel.id)}</span>
                 <span>Источников: {channel.linkedSourcesCount}</span>
+                <span>Сегодня: {channel.postsToday ?? 0}</span>
               </div>
+
               {(() => {
-                const tags = channelService.getChannelTagsById(channel.id);
+                const tags = channelService.getChannelTagsById(channel.id)
                 return tags.length > 0 ? (
-                  <div className="flex items-center gap-1 mt-2 flex-wrap">
-                    {tags.map(t => <TagBadge key={t.id} name={t.name} color={t.color} />)}
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    {tags.map((tag) => (
+                      <TagBadge key={tag.id} name={tag.name} color={tag.color} />
+                    ))}
                   </div>
-                ) : null;
+                ) : null
               })()}
             </div>
           ))
         )}
       </div>
 
-      {/* Desktop table */}
-      <div className="bg-white rounded-lg border hidden md:block">
+      <div className="hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Канал</TableHead>
               <TableHead>Режим</TableHead>
               <TableHead>Статус</TableHead>
-              <TableHead>Сегодня</TableHead>
               <TableHead>Источников</TableHead>
+              <TableHead>Сегодня</TableHead>
               <TableHead>Последняя публикация</TableHead>
-              <TableHead />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {pageChannels.length === 0 ? (
+            {channels.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={7} className="text-center py-12 text-gray-500">
-                  <Radio className="size-8 text-gray-300 mx-auto mb-3" />
-                  <div className="font-medium">
-                    {channels.length === 0 ? "Каналов пока нет" : "Нет каналов с выбранным фильтром"}
-                  </div>
-                  {channels.length === 0 && (
+                <TableCell colSpan={6} className="py-12 text-center text-muted-foreground">
+                  <Radio className="mx-auto mb-3 size-8 text-muted-foreground" />
+                  <div className="font-medium">{hasActiveFilters ? 'Нет каналов с выбранным фильтром' : 'Каналов пока нет'}</div>
+                  {!hasActiveFilters && (
                     <>
-                      <div className="text-sm mt-1">Добавьте первый канал для публикации контента</div>
+                      <div className="mt-1 text-sm">Добавьте первый канал для публикации контента</div>
                       <Button className="mt-4" onClick={() => setIsAddDialogOpen(true)}>
-                        <Plus className="size-4 mr-2" />
+                        <Plus className="mr-2 size-4" />
                         Добавить канал
                       </Button>
                     </>
@@ -271,41 +284,50 @@ export function TeamChannelsPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              pageChannels.map((channel) => (
-                <TableRow
-                  key={channel.id}
-                  className="cursor-pointer hover:bg-gray-50"
-                  onClick={() => navigate(`/channels/${channel.id}`)}
-                >
+              channels.map((channel) => (
+                <TableRow key={channel.id} className="cursor-pointer hover:bg-muted/40" onClick={() => navigate(`/channels/${channel.id}`)}>
                   <TableCell>
                     <div className="flex items-center gap-2.5">
-                      <div className={`size-2 rounded-full flex-shrink-0 ${
-                        channel.lastError ? "bg-red-500" : channel.isActive ? "bg-green-500" : "bg-gray-300"
-                      }`} />
+                      <div
+                        className={`size-2 flex-shrink-0 rounded-full ${
+                          channel.lastError ? 'bg-red-500' : channel.isActive ? 'bg-green-500' : 'bg-muted-foreground/40'
+                        }`}
+                      />
                       <div>
-                        <div className="font-medium text-gray-900">{channel.name}</div>
-                        <a
-                          href={`https://t.me/${channel.telegramId.replace("@", "")}`}
-                          target="_blank" rel="noopener noreferrer"
-                          className="text-xs text-blue-500 hover:text-blue-600"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {channel.telegramId}
-                        </a>
+                        <div className="font-medium text-foreground">{channel.name}</div>
+                        {channelService.getChannelPublicUrl(channel) ? (
+                          <a
+                            href={channelService.getChannelPublicUrl(channel)!}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-primary transition-colors hover:text-primary/80"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {channelService.getChannelDisplayLabel(channel)}
+                          </a>
+                        ) : (
+                          <div className="text-xs text-muted-foreground">{channelService.getChannelDisplayLabel(channel)}</div>
+                        )}
+                        <div className="text-[11px] text-muted-foreground">ID: {channelService.getChannelTechnicalId(channel)}</div>
                         {(() => {
-                          const tags = channelService.getChannelTagsById(channel.id);
+                          const tags = channelService.getChannelTagsById(channel.id)
                           return tags.length > 0 ? (
-                            <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-                              {tags.map(t => <TagBadge key={t.id} name={t.name} color={t.color} />)}
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1">
+                              {tags.map((tag) => (
+                                <TagBadge key={tag.id} name={tag.name} color={tag.color} />
+                              ))}
                             </div>
-                          ) : null;
+                          ) : null
                         })()}
                       </div>
                     </div>
                   </TableCell>
                   <TableCell>
-                    <Badge variant={channel.publishMode === "instant" ? "default" : "secondary"} className="text-xs">
-                      {channel.publishMode === "instant" ? "Мгновенный" : "По расписанию"}
+                    <Badge
+                      variant={channel.publishMode === 'scheduled' ? 'secondary' : channel.publishMode === 'every_material' ? 'outline' : 'default'}
+                      className="text-xs"
+                    >
+                      {channelService.getChannelPublishModeLabel(channel.publishMode)}
                     </Badge>
                   </TableCell>
                   <TableCell>
@@ -316,13 +338,13 @@ export function TeamChannelsPage() {
                       </div>
                     ) : !channel.isActive ? (
                       <div className="flex items-center gap-1.5">
-                        <div className="size-2 rounded-full bg-gray-300" />
-                        <span className="text-sm text-gray-500">Выключен</span>
+                        <div className="size-2 rounded-full bg-muted-foreground/40" />
+                        <span className="text-sm text-muted-foreground">Выключен</span>
                       </div>
                     ) : channel.botCanPost ? (
                       <div className="flex items-center gap-1.5">
                         <div className="size-2 rounded-full bg-green-500" />
-                        <span className="text-sm text-gray-700">Активен</span>
+                        <span className="text-sm text-foreground">Активен</span>
                       </div>
                     ) : (
                       <div className="flex items-center gap-1.5">
@@ -332,30 +354,17 @@ export function TeamChannelsPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm text-gray-700">{postsTodayByChannel(channel.id)}</span>
+                    <span className="text-sm text-foreground">{channel.linkedSourcesCount}</span>
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm text-gray-700">{channel.linkedSourcesCount}</span>
+                    <span className="text-sm text-foreground">{channel.postsToday ?? 0}</span>
                   </TableCell>
                   <TableCell>
                     {channel.lastPublishedAt ? (
-                      <span className="text-sm text-gray-600">
-                        {new Date(channel.lastPublishedAt).toLocaleString("ru-RU")}
-                      </span>
+                      <span className="text-sm text-muted-foreground">{new Date(channel.lastPublishedAt).toLocaleString('ru-RU')}</span>
                     ) : (
-                      <span className="text-gray-400 text-sm">Никогда</span>
+                      <span className="text-sm text-muted-foreground/80">Никогда</span>
                     )}
-                  </TableCell>
-                  <TableCell onClick={(e) => e.stopPropagation()}>
-                    <button
-                      className="text-xs text-red-400 hover:text-red-600 transition-colors px-2 py-1 rounded hover:bg-red-50"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteChannel(channel.id);
-                      }}
-                    >
-                      Удалить
-                    </button>
                   </TableCell>
                 </TableRow>
               ))
@@ -364,19 +373,9 @@ export function TeamChannelsPage() {
         </Table>
       </div>
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={totalItems}
-        pageSize={PAGE_SIZE}
-      />
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={totalItems} pageSize={PAGE_SIZE} />
 
-      <AddChannelDialog
-        open={isAddDialogOpen}
-        onOpenChange={setIsAddDialogOpen}
-        onCreated={handleChannelCreated}
-      />
+      <AddChannelDialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen} onCreated={handleChannelCreated} />
 
       <ManageTagsDialog
         open={manageTagsOpen}
@@ -387,5 +386,5 @@ export function TeamChannelsPage() {
         onChanged={() => invalidate()}
       />
     </div>
-  );
+  )
 }

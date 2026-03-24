@@ -29,7 +29,7 @@ export function TeamScopeGuard<T>({ state, children, notFoundLabel }: Props<T>) 
   if (state.status === 'loading' || state.status === 'idle') {
     return (
       <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-6 animate-spin text-gray-400" />
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
     );
   }
@@ -37,7 +37,7 @@ export function TeamScopeGuard<T>({ state, children, notFoundLabel }: Props<T>) 
   if (state.status === 'error' || state.status === 'empty') {
     return (
       <div className="text-center py-24">
-        <p className="text-gray-500 text-sm">
+        <p className="text-sm text-muted-foreground">
           {notFoundLabel ?? 'Объект не найден или недоступен в этой команде'}
         </p>
       </div>

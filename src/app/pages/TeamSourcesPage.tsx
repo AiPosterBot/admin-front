@@ -1,303 +1,290 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router";
-import { toast } from "sonner";
-import {
-  Plus, Database,
-  CheckCircle, XCircle, Filter, Pause, Tag, Loader2,
-} from "lucide-react";
-import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "../components/ui/table";
-import { Pagination, usePagination } from "../components/Pagination";
-import { useTeam } from "../context/TeamContext";
-import { AddSourceDialog } from "../components/AddSourceDialog";
-import { TagBadge } from "../components/TagBadge";
-import { TagFilter } from "../components/TagFilter";
-import { ManageTagsDialog } from "../components/ManageTagsDialog";
-// ── Service layer ────────────────────────────────────────────────────
-import { useTeamSources } from "../hooks/useTeamSources";
-import * as sourceService from "../services/sourceService";
-import * as teamService from "../services/teamService";
+﻿import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router'
+import { toast } from 'sonner'
+import { Plus, Database, CheckCircle, XCircle, Filter, Pause, Tag, Loader2 } from 'lucide-react'
 
-const PAGE_SIZE = 10;
+import { Button } from '../components/ui/button'
+import { Badge } from '../components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { Pagination } from '../components/Pagination'
+import { useTeam } from '../context/TeamContext'
+import { AddSourceDialog } from '../components/AddSourceDialog'
+import { TagBadge } from '../components/TagBadge'
+import { TagFilter } from '../components/TagFilter'
+import { ManageTagsDialog } from '../components/ManageTagsDialog'
+import { useTeamSources } from '../hooks/useTeamSources'
+import * as sourceService from '../services/sourceService'
+
+const PAGE_SIZE = 10
 
 const SOURCE_TYPE_LABEL: Record<string, string> = {
-  rss: "RSS",
-  website: "Web",
-  telegram: "TG",
-};
+  rss: 'RSS',
+  website: 'Web',
+  telegram: 'TG',
+}
 
-type StatusFilter = "all" | "active" | "stopped" | "error";
-type TypeFilter = "all" | "rss" | "website" | "telegram";
+type StatusFilter = 'all' | 'active' | 'stopped' | 'error'
+type TypeFilter = 'all' | 'rss' | 'website' | 'telegram'
 
 export function TeamSourcesPage() {
-  const { currentTeamId } = useTeam();
-  const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
+  const { currentTeam, currentTeamId } = useTeam()
+  const navigate = useNavigate()
+  const team = currentTeam
 
-  // ── Реактивный список через сервис (обновляется при смене команды) ──
-  const { state: sourcesState, invalidate } = useTeamSources();
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [typeFilter, setTypeFilter] = useState<TypeFilter>('all')
+  const [page, setPage] = useState(1)
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([])
+  const [manageTagsOpen, setManageTagsOpen] = useState(false)
 
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
-  const [page, setPage] = useState(1);
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
-  const [selectedTagIds, setSelectedTagIds] = useState<string[]>([]);
-  const [manageTagsOpen, setManageTagsOpen] = useState(false);
+  useEffect(() => {
+    if (!currentTeamId) {
+      return
+    }
 
-  const teamTags = sourceService.getTeamSourceTags(currentTeamId ?? "");
+    void sourceService.primeTeamSourceTags(currentTeamId)
+  }, [currentTeamId])
+
+  const { state: sourcesState, invalidate } = useTeamSources({
+    page,
+    limit: PAGE_SIZE,
+    status: statusFilter === 'active' ? 'ok' : statusFilter === 'error' ? 'error' : 'all',
+    type: typeFilter !== 'all' ? typeFilter : undefined,
+    isActive: statusFilter === 'active' ? true : statusFilter === 'stopped' ? false : statusFilter === 'error' ? true : undefined,
+    tagIds: selectedTagIds,
+  })
+
+  const teamTags = sourceService.getTeamSourceTags(currentTeamId ?? '')
 
   if (!team) {
     return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Команда не выбрана</h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-foreground">Команда не выбрана</h2>
+        <p className="text-muted-foreground">Выберите команду в верхнем меню</p>
       </div>
-    );
+    )
   }
 
-  if (sourcesState.status === "loading" || sourcesState.status === "idle") {
+  if (sourcesState.status === 'loading' || sourcesState.status === 'idle') {
     return (
       <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-6 animate-spin text-gray-400" />
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
-    );
+    )
   }
 
-  const sources = sourcesState.status === "success" ? sourcesState.data : [];
+  if (sourcesState.status === 'error') {
+    return <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-6 text-sm text-destructive">{sourcesState.error}</div>
+  }
 
-  // Сколько каналов использует каждый источник (через сервис)
-  const channelsForSource = (sourceId: string) =>
-    sourceService.getChannelsForSource(sourceId, currentTeamId!);
+  const sourcesResult = sourcesState.data
+  const sources = sourcesResult.data
+  const totalItems = sourcesResult.total
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE))
+  const statusCounts = sourcesResult.facets?.statusCounts ?? { all: totalItems, active: 0, stopped: 0, error: 0 }
+  const typeCounts = sourcesResult.facets?.typeCounts ?? { all: totalItems, rss: 0, website: 0, telegram: 0 }
 
-  const countActive  = sources.filter(s => s.isActive && s.status === "ok").length;
-  const countStopped = sources.filter(s => !s.isActive).length;
-  const countError   = sources.filter(s => s.isActive && s.status === "error").length;
-  const countRss   = sources.filter(s => s.type === "rss").length;
-  const countWeb   = sources.filter(s => s.type === "website").length;
-  const countTg    = sources.filter(s => s.type === "telegram").length;
+  const handleStatusChange = (value: StatusFilter) => {
+    setStatusFilter(value)
+    setPage(1)
+  }
 
-  // Фильтрация
-  const filtered = sources
-    .filter(s => {
-      if (statusFilter === "active")  return s.isActive && s.status === "ok";
-      if (statusFilter === "stopped") return !s.isActive;
-      if (statusFilter === "error")   return s.isActive && s.status === "error";
-      return true;
-    })
-    .filter(s => typeFilter === "all" || s.type === typeFilter)
-    .filter(s => {
-      if (selectedTagIds.length === 0) return true;
-      const sTags = sourceService.getSourceTagsById(s.id);
-      return sTags.some(t => selectedTagIds.includes(t.id));
-    });
+  const handleTypeChange = (value: TypeFilter) => {
+    setTypeFilter(value)
+    setPage(1)
+  }
 
-  const { totalPages, paginate, totalItems: paginationTotal } = usePagination(filtered, PAGE_SIZE);
-  const pageSources = paginate(page);
+  const handleTagFilterChange = (ids: string[]) => {
+    setSelectedTagIds(ids)
+    setPage(1)
+  }
 
-  const handleStatusChange = (v: StatusFilter) => { setStatusFilter(v); setPage(1); };
-  const handleTypeChange   = (v: TypeFilter)   => { setTypeFilter(v);   setPage(1); };
-  const handleTagFilterChange = (ids: string[]) => { setSelectedTagIds(ids); setPage(1); };
+  const hasActiveFilters = statusFilter !== 'all' || typeFilter !== 'all' || selectedTagIds.length > 0
 
-  const statusFilterOptions: { value: StatusFilter; label: string; count: number; icon?: React.ReactNode }[] = [
-    { value: "all",     label: "Все",           count: sources.length },
-    { value: "active",  label: "Активные",      count: countActive,  icon: <CheckCircle className="size-3.5 text-green-500" /> },
-    { value: "stopped", label: "Остановленные", count: countStopped, icon: <Pause className="size-3.5 text-gray-400" /> },
-    { value: "error",   label: "С ошибками",    count: countError,   icon: <XCircle className="size-3.5 text-red-500" /> },
-  ];
+  const statusFilterOptions: Array<{ value: StatusFilter; label: string; count: number; icon?: React.ReactNode }> = [
+    { value: 'all', label: 'Все', count: statusCounts.all },
+    { value: 'active', label: 'Активные', count: statusCounts.active, icon: <CheckCircle className="size-3.5 text-green-500" /> },
+    { value: 'stopped', label: 'Остановленные', count: statusCounts.stopped, icon: <Pause className="size-3.5 text-muted-foreground" /> },
+    { value: 'error', label: 'С ошибками', count: statusCounts.error, icon: <XCircle className="size-3.5 text-red-500" /> },
+  ]
 
-  const typeFilterOptions: { value: TypeFilter; label: string; count: number }[] = [
-    { value: "all",      label: "Все типы", count: sources.length },
-    { value: "rss",      label: "RSS",      count: countRss },
-    { value: "website",  label: "Web",      count: countWeb },
-    { value: "telegram", label: "Telegram", count: countTg },
-  ];
+  const typeFilterOptions: Array<{ value: TypeFilter; label: string; count: number }> = [
+    { value: 'all', label: 'Все типы', count: typeCounts.all },
+    { value: 'rss', label: 'RSS', count: typeCounts.rss },
+    { value: 'website', label: 'Web', count: typeCounts.website },
+    { value: 'telegram', label: 'Telegram', count: typeCounts.telegram },
+  ]
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start sm:items-center justify-between gap-3 flex-wrap">
+      <div className="rounded-2xl border border-violet-500/20 bg-gradient-to-r from-violet-500/10 via-background to-sky-500/10 p-5 shadow-sm">
+        <div className="flex items-start justify-between gap-3 flex-wrap sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Источники контента</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            {team.name} · {sources.length} источников
+          <h1 className="text-2xl font-bold text-foreground">Источники контента</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {team.name} · {totalItems} источников
+          </p>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Здесь вы управляете источниками контента. Вы можете добавить Telegram, RSS и сайты со статьями.
           </p>
         </div>
         <Button onClick={() => setIsAddDialogOpen(true)} className="w-full sm:w-auto">
-          <Plus className="size-4 mr-2" />
+          <Plus className="mr-2 size-4" />
           Добавить источник
         </Button>
         <AddSourceDialog
           open={isAddDialogOpen}
           onOpenChange={setIsAddDialogOpen}
           onSourceCreated={() => {
-            invalidate();
-            toast.success("Источник добавлен");
+            invalidate()
+            toast.success('Источник добавлен')
           }}
         />
       </div>
+      </div>
 
-      {/* Filter bar */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-4 flex-wrap">
-          {/* Status filters */}
           <div className="flex items-center gap-2">
-            <Filter className="size-3.5 text-gray-400 shrink-0" />
+            <Filter className="size-3.5 shrink-0 text-muted-foreground" />
             <div className="flex items-center gap-1 flex-wrap">
               {statusFilterOptions.map(({ value, label, count, icon }) => (
                 <button
                   key={value}
                   onClick={() => handleStatusChange(value)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                    statusFilter === value
-                      ? "bg-gray-900 text-white"
-                      : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
-                  }`}
+                    className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                      statusFilter === value
+                        ? 'bg-foreground text-background shadow-sm'
+                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                    }`}
                 >
                   {icon}
                   {label}
-                  <span className={`text-xs tabular-nums ${statusFilter === value ? "text-white/50" : "text-gray-400"}`}>
-                    {count}
-                  </span>
+                  <span className={`text-xs tabular-nums ${statusFilter === value ? 'opacity-70' : 'text-muted-foreground'}`}>{count}</span>
                 </button>
               ))}
             </div>
           </div>
 
-          {/* Type filters */}
-          <div className="h-5 w-px bg-gray-200 hidden sm:block" />
+          <div className="hidden h-5 w-px bg-border sm:block" />
           <div className="flex items-center gap-1 flex-wrap">
             {typeFilterOptions.map(({ value, label, count }) => (
               <button
                 key={value}
                 onClick={() => handleTypeChange(value)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                  typeFilter === value
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  typeFilter === value ? 'bg-foreground text-background shadow-sm' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 }`}
               >
                 {label}
-                <span className={`text-xs tabular-nums ${typeFilter === value ? "text-white/50" : "text-gray-400"}`}>
-                  {count}
-                </span>
+                <span className={`text-xs tabular-nums ${typeFilter === value ? 'opacity-70' : 'text-muted-foreground'}`}>{count}</span>
               </button>
             ))}
           </div>
 
-          {/* Tag filters */}
-          <div className="h-5 w-px bg-gray-200 hidden sm:block" />
-          <TagFilter
-            tags={teamTags}
-            selectedTagIds={selectedTagIds}
-            onChange={handleTagFilterChange}
-          />
+          <div className="hidden h-5 w-px bg-border sm:block" />
+          <TagFilter tags={teamTags} selectedTagIds={selectedTagIds} onChange={handleTagFilterChange} />
           <button
             onClick={() => setManageTagsOpen(true)}
-            className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors px-2 py-1.5 rounded-md hover:bg-gray-50"
+            className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title="Управление тегами"
           >
             <Tag className="size-3.5" />
           </button>
         </div>
 
-        {(statusFilter !== "all" || typeFilter !== "all" || selectedTagIds.length > 0) && (
+        {hasActiveFilters && (
           <button
-            onClick={() => { setStatusFilter("all"); setTypeFilter("all"); setSelectedTagIds([]); setPage(1); }}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+            onClick={() => {
+              setStatusFilter('all')
+              setTypeFilter('all')
+              setSelectedTagIds([])
+              setPage(1)
+            }}
+            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
           >
             Сбросить
           </button>
         )}
       </div>
 
-      {/* Sources — Mobile cards */}
-      <div className="md:hidden space-y-3">
-        {pageSources.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            <Database className="size-8 text-gray-300 mx-auto mb-3" />
-            <div className="font-medium">
-              {sources.length === 0 ? "Источников пока нет" : "Нет источников с выбранным фильтром"}
-            </div>
-            {sources.length === 0 && (
+      <div className="space-y-3 md:hidden">
+        {sources.length === 0 ? (
+          <div className="py-12 text-center text-muted-foreground">
+            <Database className="mx-auto mb-3 size-8 text-muted-foreground" />
+            <div className="font-medium">{hasActiveFilters ? 'Нет источников с выбранным фильтром' : 'Источников пока нет'}</div>
+            {!hasActiveFilters && (
               <Button className="mt-4" onClick={() => setIsAddDialogOpen(true)}>
-                <Plus className="size-4 mr-2" />
+                <Plus className="mr-2 size-4" />
                 Добавить источник
               </Button>
             )}
           </div>
         ) : (
-          pageSources.map((src) => {
-            const linkedChannels = channelsForSource(src.id);
-            return (
-              <div
-                key={src.id}
-                className="bg-white rounded-lg border p-4 active:bg-gray-50 transition-colors cursor-pointer"
-                onClick={() => navigate(`/sources/${src.id}`)}
-              >
-                <div className="flex items-start justify-between gap-3 mb-2">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    <div
-                      className={`size-2.5 rounded-full flex-shrink-0 mt-1 ${
-                        !src.isActive ? "bg-gray-400" :
-                        src.status === "error" ? "bg-red-500" : "bg-green-500"
-                      }`}
-                    />
-                    <div className="min-w-0">
-                      <div className="font-medium text-gray-900 truncate">{src.name}</div>
-                      <div className="text-xs text-gray-400 truncate">{src.url}</div>
-                    </div>
+          sources.map((source) => (
+            <div
+              key={source.id}
+              className="cursor-pointer rounded-lg border border-border bg-card p-4 text-card-foreground transition-colors hover:bg-muted/40 active:bg-muted/60"
+              onClick={() => navigate(`/sources/${source.id}`)}
+            >
+              <div className="mb-2 flex items-start justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <div
+                    className={`mt-1 size-2.5 flex-shrink-0 rounded-full ${
+                      !source.isActive ? 'bg-muted-foreground/50' : source.status === 'error' ? 'bg-red-500' : 'bg-green-500'
+                    }`}
+                  />
+                  <div className="min-w-0">
+                    <div className="truncate font-medium text-foreground">{source.name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{source.url}</div>
                   </div>
-                  <Badge variant="outline" className="text-xs shrink-0">
-                    {SOURCE_TYPE_LABEL[src.type]}
-                  </Badge>
                 </div>
-                <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
-                  {!src.isActive ? (
-                    <span className="text-gray-400">Остановлен</span>
-                  ) : src.status === "error" ? (
-                    <span className="text-red-600">Ошибка</span>
-                  ) : (
-                    <span className="text-green-600">Активен</span>
-                  )}
-                  <span>Сег: {src.itemsCount24h}</span>
-                  <span>Нед: {src.itemsCountWeek}</span>
-                  <span>Всего: {src.itemsCount}</span>
-                </div>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  {linkedChannels.length > 0 && (
-                    <div className="flex items-center gap-1 flex-wrap">
-                      {linkedChannels.slice(0, 2).map(ch => (
-                        <Badge key={ch.id} variant="outline" className="text-xs font-normal">
-                          {ch.name}
-                        </Badge>
-                      ))}
-                      {linkedChannels.length > 2 && (
-                        <span className="text-xs text-gray-400">+{linkedChannels.length - 2}</span>
-                      )}
-                    </div>
-                  )}
-                  {(() => {
-                    const tags = sourceService.getSourceTagsById(src.id);
-                    return tags.length > 0 ? (
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {tags.map(t => (
-                          <TagBadge key={t.id} name={t.name} color={t.color} />
-                        ))}
-                      </div>
-                    ) : null;
-                  })()}
-                </div>
+                <Badge variant="outline" className="shrink-0 text-xs">
+                  {SOURCE_TYPE_LABEL[source.type]}
+                </Badge>
               </div>
-            );
-          })
+
+              <div className="flex items-center gap-3 flex-wrap text-xs text-muted-foreground">
+                {!source.isActive ? (
+                    <span className="text-muted-foreground">Остановлен</span>
+                ) : source.status === 'error' ? (
+                  <span className="text-red-600">Ошибка</span>
+                ) : (
+                  <span className="text-green-600">Активен</span>
+                )}
+                <span>Сег: {source.itemsCount24h}</span>
+                <span>Нед: {source.itemsCountWeek}</span>
+                <span>Всего: {source.itemsCount}</span>
+                <span>Каналы: {source.linkedChannelsCount ?? 0}</span>
+              </div>
+
+              <div className="mt-2 flex items-center gap-2 flex-wrap">
+                {(source.linkedChannelsPreview ?? []).slice(0, 2).map((channel) => (
+                  <Badge key={channel.id} variant="outline" className="text-xs font-normal">
+                    {channel.name}
+                  </Badge>
+                ))}
+                {(source.linkedChannelsPreview?.length ?? 0) > 2 && (
+                  <span className="text-xs text-muted-foreground">+{(source.linkedChannelsPreview?.length ?? 0) - 2}</span>
+                )}
+                {(() => {
+                  const tags = sourceService.getSourceTagsById(source.id)
+                  return tags.length > 0 ? (
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {tags.map((tag) => (
+                        <TagBadge key={tag.id} name={tag.name} color={tag.color} />
+                      ))}
+                    </div>
+                  ) : null
+                })()}
+              </div>
+            </div>
+          ))
         )}
       </div>
 
-      {/* Sources table — Desktop */}
-      <div className="bg-white rounded-lg border hidden md:block">
+      <div className="hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -307,23 +294,21 @@ export function TeamSourcesPage() {
               <TableHead className="text-right">Сегодня</TableHead>
               <TableHead className="text-right">Неделя</TableHead>
               <TableHead className="text-right">Всего</TableHead>
-              <TableHead>Каналы</TableHead>
+              <TableHead className="text-right">Каналы</TableHead>
               <TableHead>Последний сбор</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {pageSources.length === 0 ? (
+            {sources.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="text-center py-12 text-gray-500">
-                  <Database className="size-8 text-gray-300 mx-auto mb-3" />
-                  <div className="font-medium">
-                    {sources.length === 0 ? "Источников пока нет" : "Нет источников с выбранным фильтром"}
-                  </div>
-                  {sources.length === 0 && (
+                <TableCell colSpan={8} className="py-12 text-center text-muted-foreground">
+                  <Database className="mx-auto mb-3 size-8 text-muted-foreground" />
+                  <div className="font-medium">{hasActiveFilters ? 'Нет источников с выбранным фильтром' : 'Источников пока нет'}</div>
+                  {!hasActiveFilters && (
                     <>
-                      <div className="text-sm mt-1">Добавьте первый источник для сбора контента</div>
+                      <div className="mt-1 text-sm">Добавьте первый источник для сбора контента</div>
                       <Button className="mt-4" onClick={() => setIsAddDialogOpen(true)}>
-                        <Plus className="size-4 mr-2" />
+                        <Plus className="mr-2 size-4" />
                         Добавить источник
                       </Button>
                     </>
@@ -331,116 +316,97 @@ export function TeamSourcesPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              pageSources.map((src) => {
-                const linkedChannels = channelsForSource(src.id);
-                return (
-                  <TableRow
-                    key={src.id}
-                    className="cursor-pointer hover:bg-gray-50"
-                    onClick={() => navigate(`/sources/${src.id}`)}
-                  >
-                    <TableCell>
-                      <div className="flex items-center gap-2.5">
-                        <div
-                          className={`size-2 rounded-full flex-shrink-0 ${
-                            !src.isActive ? "bg-gray-400" :
-                            src.status === "error" ? "bg-red-500" : "bg-green-500"
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <div className="font-medium text-gray-900">{src.name}</div>
-                          <div className="text-xs text-gray-400 truncate max-w-[240px]">{src.url}</div>
-                          {(() => {
-                            const tags = sourceService.getSourceTagsById(src.id);
-                            return tags.length > 0 ? (
-                              <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-                                {tags.map(t => (
-                                  <TagBadge key={t.id} name={t.name} color={t.color} />
-                                ))}
-                              </div>
-                            ) : null;
-                          })()}
-                        </div>
+              sources.map((source) => (
+                <TableRow key={source.id} className="cursor-pointer hover:bg-muted/40" onClick={() => navigate(`/sources/${source.id}`)}>
+                  <TableCell>
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        className={`size-2 flex-shrink-0 rounded-full ${
+                          !source.isActive ? 'bg-muted-foreground/50' : source.status === 'error' ? 'bg-red-500' : 'bg-green-500'
+                        }`}
+                      />
+                      <div className="min-w-0">
+                        <div className="font-medium text-foreground">{source.name}</div>
+                        <div className="max-w-[240px] truncate text-xs text-muted-foreground">{source.url}</div>
+                        {(() => {
+                          const tags = sourceService.getSourceTagsById(source.id)
+                          return tags.length > 0 ? (
+                            <div className="mt-0.5 flex items-center gap-1 flex-wrap">
+                              {tags.map((tag) => (
+                                <TagBadge key={tag.id} name={tag.name} color={tag.color} />
+                              ))}
+                            </div>
+                          ) : null
+                        })()}
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-xs">
-                        {SOURCE_TYPE_LABEL[src.type]}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      {!src.isActive ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="size-2 rounded-full bg-gray-400" />
-                          <span className="text-sm text-gray-500">Остановлен</span>
-                        </div>
-                      ) : src.status === "error" ? (
-                        <div className="flex items-center gap-1.5">
-                          <div className="size-2 rounded-full bg-red-500" />
-                          <span className="text-sm text-red-600">Ошибка</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1.5">
-                          <div className="size-2 rounded-full bg-green-500" />
-                          <span className="text-sm text-gray-700">Активен</span>
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-sm">{src.itemsCount24h}</TableCell>
-                    <TableCell className="text-right tabular-nums text-sm">{src.itemsCountWeek}</TableCell>
-                    <TableCell className="text-right tabular-nums text-sm">{src.itemsCount}</TableCell>
-                    <TableCell>
-                      {linkedChannels.length === 0 ? (
-                        <span className="text-gray-400 text-sm">—</span>
-                      ) : (
-                        <div className="flex items-center gap-1 flex-wrap">
-                          {linkedChannels.slice(0, 2).map(ch => (
-                            <Link
-                              key={ch.id}
-                              to={`/channels/${ch.id}`}
-                              onClick={e => e.stopPropagation()}
-                            >
-                              <Badge
-                                variant="outline"
-                                className="text-xs font-normal hover:border-blue-400 hover:text-blue-600 transition-colors"
-                              >
-                                {ch.name}
-                              </Badge>
-                            </Link>
-                          ))}
-                          {linkedChannels.length > 2 && (
-                            <span className="text-xs text-gray-400">+{linkedChannels.length - 2}</span>
-                          )}
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {src.lastFetchedAt ? (
-                        <span className="text-sm text-gray-600">
-                          {new Date(src.lastFetchedAt).toLocaleString("ru-RU", {
-                            day: "numeric", month: "short",
-                            hour: "2-digit", minute: "2-digit",
-                          })}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400 text-sm">Никогда</span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                );
-              })
+                    </div>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-xs">
+                      {SOURCE_TYPE_LABEL[source.type]}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {!source.isActive ? (
+                      <div className="flex items-center gap-1.5">
+                        <div className="size-2 rounded-full bg-muted-foreground/50" />
+                        <span className="text-sm text-muted-foreground">Остановлен</span>
+                      </div>
+                    ) : source.status === 'error' ? (
+                      <div className="flex items-center gap-1.5">
+                        <div className="size-2 rounded-full bg-red-500" />
+                        <span className="text-sm text-red-600">Ошибка</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-1.5">
+                        <div className="size-2 rounded-full bg-green-500" />
+                        <span className="text-sm text-foreground">Активен</span>
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right text-sm tabular-nums">{source.itemsCount24h}</TableCell>
+                  <TableCell className="text-right text-sm tabular-nums">{source.itemsCountWeek}</TableCell>
+                  <TableCell className="text-right text-sm tabular-nums">{source.itemsCount}</TableCell>
+                  <TableCell className="text-right">
+                    {(source.linkedChannelsPreview?.length ?? 0) === 0 ? (
+                        <span className="text-sm text-muted-foreground">-</span>
+                    ) : (
+                      <div className="flex items-center gap-1 flex-wrap justify-end">
+                        {(source.linkedChannelsPreview ?? []).slice(0, 2).map((channel) => (
+                          <Link key={channel.id} to={`/channels/${channel.id}`} onClick={(event) => event.stopPropagation()}>
+                            <Badge variant="outline" className="text-xs font-normal transition-colors hover:border-primary/40 hover:text-primary">
+                              {channel.name}
+                            </Badge>
+                          </Link>
+                        ))}
+                        {(source.linkedChannelsCount ?? 0) > 2 && (
+                          <span className="text-xs text-muted-foreground">+{(source.linkedChannelsCount ?? 0) - 2}</span>
+                        )}
+                      </div>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {source.lastFetchedAt ? (
+                      <span className="text-sm text-muted-foreground">
+                        {new Date(source.lastFetchedAt).toLocaleString('ru-RU', {
+                          day: 'numeric',
+                          month: 'short',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </span>
+                    ) : (
+                      <span className="text-sm text-muted-foreground">Никогда</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))
             )}
           </TableBody>
         </Table>
       </div>
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={paginationTotal}
-        pageSize={PAGE_SIZE}
-      />
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={totalItems} pageSize={PAGE_SIZE} />
 
       <ManageTagsDialog
         open={manageTagsOpen}
@@ -451,5 +417,5 @@ export function TeamSourcesPage() {
         onChanged={() => invalidate()}
       />
     </div>
-  );
+  )
 }

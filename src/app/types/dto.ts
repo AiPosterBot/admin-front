@@ -1,15 +1,14 @@
-// ══════════════════════════════════════════════════════════════════════
-//  DTO — строгие контракты под backend.
-//  Этот файл — единственный источник правды о shape API-ответов.
-//  mock-data.ts использует эти типы; при переходе на реальный backend
-//  меняется только слой сервисов, не страницы.
-// ══════════════════════════════════════════════════════════════════════
+// ------------------------------------------------------------------------------
+// DTO types define the strict frontend contract for backend responses.
+// Pages and services normalize API payloads into these read-model shapes.
+// ------------------------------------------------------------------------------
 
 // ── Статусы ──────────────────────────────────────────────────────────
 
 export type JobStatus = 'pending' | 'running' | 'success' | 'failed';
 
 export type JobType =
+  | 'refresh_channel_metadata'
   | 'publish_to_channel'
   | 'fetch_rss'
   | 'fetch_rss_hybrid'
@@ -21,6 +20,10 @@ export type JobType =
 
 // ── Job Params (дискриминированный union по полю `type`) ─────────────
 
+export interface RefreshChannelMetadataParams {
+  type: 'refresh_channel_metadata';
+  channelId: string;
+}
 export interface PublishToChannelParams {
   type: 'publish_to_channel';
   channelId: string;
@@ -69,6 +72,7 @@ export interface AdsCampaignParams {
 
 /** Дискриминированный union всех параметров джобов */
 export type JobParams =
+  | RefreshChannelMetadataParams
   | PublishToChannelParams
   | FetchRssParams
   | FetchRssHybridParams
@@ -80,6 +84,14 @@ export type JobParams =
 
 // ── Job Results (дискриминированный union по полю `type`) ─────────────
 
+export interface RefreshChannelMetadataResult {
+  type: 'refresh_channel_metadata';
+  channelId: string;
+  botCanPost: boolean;
+  telegramUsername?: string | null;
+  subscribersCount: number;
+  publishOutcome: string;
+}
 export interface PublishToChannelResult {
   type: 'publish_to_channel';
   postedItemId: string;
@@ -124,6 +136,7 @@ export interface AdsCampaignResult {
 
 /** Дискриминированный union всех результатов джобов */
 export type JobResult =
+  | RefreshChannelMetadataResult
   | PublishToChannelResult
   | FetchRssResult
   | FetchRssHybridResult
@@ -136,6 +149,7 @@ export type JobResult =
 // ── Вспомогательные: map type → params/result для generic-кода ────────
 
 export interface JobParamsMap {
+  refresh_channel_metadata: RefreshChannelMetadataParams;
   publish_to_channel: PublishToChannelParams;
   fetch_rss:          FetchRssParams;
   fetch_rss_hybrid:   FetchRssHybridParams;
@@ -147,6 +161,7 @@ export interface JobParamsMap {
 }
 
 export interface JobResultMap {
+  refresh_channel_metadata: RefreshChannelMetadataResult;
   publish_to_channel:  PublishToChannelResult;
   fetch_rss:           FetchRssResult;
   fetch_rss_hybrid:    FetchRssHybridResult;
@@ -238,7 +253,7 @@ export interface LLMTraceDTO {
 
 export type ServiceResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: string; code?: string };
+  | { ok: false; error: string; code?: string; meta?: Record<string, unknown> | null };
 
 export function ok<T>(data: T): ServiceResult<T> {
   return { ok: true, data };
@@ -247,8 +262,9 @@ export function ok<T>(data: T): ServiceResult<T> {
 export function err<T = never>(
   error: string,
   code?: string,
+  meta?: Record<string, unknown> | null,
 ): ServiceResult<T> {
-  return { ok: false, error, code };
+  return { ok: false, error, code, meta };
 }
 
 // ── Утилиты для работы с params/result без type guards ────────────────

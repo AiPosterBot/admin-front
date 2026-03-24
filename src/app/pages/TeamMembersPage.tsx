@@ -1,174 +1,231 @@
-import { useState } from "react";
-import { toast } from "sonner";
-import { Plus, Mail, Copy, CheckCircle, X, Clock, Loader2 } from "lucide-react";
-import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
+﻿import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
+import { CheckCircle, Clock, Copy, Loader2, Mail, Plus, X } from 'lucide-react'
+import { Button } from '../components/ui/button'
+import { Badge } from '../components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog'
 import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "../components/ui/table";
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
-} from "../components/ui/dialog";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
-} from "../components/ui/alert-dialog";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
-import { Alert, AlertDescription } from "../components/ui/alert";
-import { Pagination, usePagination } from "../components/Pagination";
-import { UserAvatar } from "../components/UserAvatar";
-// ── Service layer ────────────────────────────────────────────────────
-import { useTeamMembers } from "../hooks/useTeamMembers";
-import * as memberService from "../services/memberService";
-import { getCurrentUser, getTeamUsage, type Invitation } from "../data/mock-data";
-import { useTeam } from "../context/TeamContext";
-// ── RBAC ─────────────────────────────────────────────────────────────
-import { useTeamPermissions } from "../lib/rbac";
-import * as teamService from "../services/teamService";
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '../components/ui/alert-dialog'
+import { Input } from '../components/ui/input'
+import { Label } from '../components/ui/label'
+import { Alert, AlertDescription } from '../components/ui/alert'
+import { Pagination, usePagination } from '../components/Pagination'
+import { UserAvatar } from '../components/UserAvatar'
+import { useTeamMembers } from '../hooks/useTeamMembers'
+import { useTeam } from '../context/TeamContext'
+import { useTeamPermissions } from '../lib/rbac'
+import { getLimitAwareErrorMessage } from '../lib/team-limit-messages'
+import * as memberService from '../services/memberService'
+import { apiGet } from '../lib/api'
 
-const PAGE_SIZE = 15;
+const PAGE_SIZE = 15
+
+interface TeamDetailsResponse {
+  team: { id: string; name: string; isActive: boolean; createdAt: string; updatedAt: string }
+  limits: {
+    maxPostsPerDay: number
+    maxChannels: number
+    maxSources: number
+    maxAgentRuns: number
+    maxMembers: number
+  }
+  myRole: 'owner' | 'member'
+  stats: {
+    channels: number
+    sources: number
+    items24h: number
+    posts24h: number
+  }
+}
 
 export function TeamMembersPage() {
-  const { currentTeamId } = useTeam();
-  const team = teamService.getTeamById(currentTeamId);
-  const currentUser = getCurrentUser();
+  const { currentTeamId, currentTeam } = useTeam()
+  const { state: membersState, invalidate } = useTeamMembers()
+  const { can } = useTeamPermissions()
 
-  // ── Реактивный список через сервис ───────────────────────────────
-  const { state: membersState, invalidate } = useTeamMembers();
+  const [page, setPage] = useState(1)
+  const [isInviteOpen, setIsInviteOpen] = useState(false)
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteError, setInviteError] = useState<string | null>(null)
+  const [createdInvite, setCreatedInvite] = useState<{ email: string; link: string } | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [maxMembers, setMaxMembers] = useState<number | null>(null)
+  const [isInviteSubmitting, setIsInviteSubmitting] = useState(false)
 
-  const [page, setPage] = useState(1);
-  const [isInviteOpen, setIsInviteOpen] = useState(false);
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteError, setInviteError] = useState<string | null>(null);
-  const [createdInvite, setCreatedInvite] = useState<{ email: string; link: string } | null>(null);
-  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    let isMounted = true
 
-  // ── RBAC ──────────────────────────────────────────────────────────
-  const { can, isOwner } = useTeamPermissions();
+    async function loadTeam() {
+      if (!currentTeamId) {
+        return
+      }
 
-  if (!team || !currentUser) {
-    return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Команда не выбрана</h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
-      </div>
-    );
-  }
-
-  if (membersState.status === "loading" || membersState.status === "idle") {
-    return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-6 animate-spin text-gray-400" />
-      </div>
-    );
-  }
-
-  const members = membersState.status === "success" ? membersState.data.members : [];
-  const invitations = membersState.status === "success" ? membersState.data.invitations : [];
-
-  const usage = getTeamUsage(team.id);
-  const atMemberLimit = usage.membersUsed >= team.limits.maxMembers;
-
-  const handleSendInvite = async () => {
-    if (!inviteEmail.trim() || !currentTeamId) return;
-    setInviteError(null);
-
-    const result = await memberService.inviteMember(currentTeamId, inviteEmail.trim());
-    if (!result.ok) {
-      setInviteError(result.error);
-      return;
+      try {
+        const response = await apiGet<TeamDetailsResponse>(`/api/teams/${currentTeamId}`)
+        if (isMounted) {
+          setMaxMembers(response.limits.maxMembers)
+        }
+      } catch {
+        if (isMounted) {
+          setMaxMembers(null)
+        }
+      }
     }
 
-    // Инвалидируем список — перечитывает и members, и invitations
-    invalidate();
-    const link = `${window.location.origin}/invite/${result.data.inviteToken}`;
-    setCreatedInvite({ email: inviteEmail.trim(), link });
-    toast.success(`Приглашение отправлено на ${inviteEmail.trim()}`);
-    setInviteEmail("");
-  };
+    void loadTeam()
+    return () => {
+      isMounted = false
+    }
+  }, [currentTeamId])
 
-  const handleCancelInvite = async (invId: string) => {
-    await memberService.cancelInvitation(invId);
-    invalidate();
-    toast.success("Приглашение отменено");
-  };
+  if (!currentTeamId || !currentTeam) {
+    return (
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-foreground">Команда не выбрана</h2>
+        <p className="text-muted-foreground">Выберите команду в верхнем меню.</p>
+      </div>
+    )
+  }
+
+  if (membersState.status === 'loading' || membersState.status === 'idle') {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  if (membersState.status === 'error') {
+    return (
+      <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        Не удалось загрузить участников команды.
+      </div>
+    )
+  }
+
+  const members = membersState.data.members
+  const invitations = membersState.data.invitations
+  const pendingInvitations = invitations.filter((invitation) => invitation.status === 'pending')
+  const atMemberLimit = maxMembers !== null && members.length + pendingInvitations.length >= maxMembers
+
+  const allItems = [
+    ...members.map((member) => ({ type: 'member' as const, data: member })),
+    ...pendingInvitations.map((invitation) => ({ type: 'invitation' as const, data: invitation })),
+  ]
+  const { totalPages, paginate, totalItems } = usePagination(allItems, PAGE_SIZE)
+  const pageItems = paginate(page)
+
+  const handleSendInvite = async () => {
+    if (!inviteEmail.trim() || !currentTeamId) {
+      return
+    }
+
+    setInviteError(null)
+    setIsInviteSubmitting(true)
+    try {
+      const invitation = await memberService.inviteMember(currentTeamId, inviteEmail.trim())
+      invalidate()
+      setCreatedInvite({
+        email: invitation.email,
+        link: `${window.location.origin}/invite/${invitation.inviteToken}`,
+      })
+      setInviteEmail('')
+      toast.success(`Приглашение отправлено на ${invitation.email}`)
+    } catch (error: any) {
+      setInviteError(getLimitAwareErrorMessage(error, 'Не удалось отправить приглашение'))
+    } finally {
+      setIsInviteSubmitting(false)
+    }
+  }
+
+  const handleCancelInvite = async (invitationId: string) => {
+    try {
+      await memberService.cancelInvitation(currentTeamId, invitationId)
+      invalidate()
+      toast.success('Приглашение отменено')
+    } catch (error: any) {
+      toast.error(error.message || 'Не удалось отменить приглашение')
+    }
+  }
+
+  const handleRemoveMember = async (userId: string, displayName: string) => {
+    try {
+      await memberService.removeMember(currentTeamId, userId)
+      invalidate()
+      toast.success(`Участник «${displayName}» удален из команды`)
+    } catch (error: any) {
+      toast.error(error.message || 'Не удалось удалить участника')
+    }
+  }
 
   const handleCopyLink = async (link: string) => {
     try {
-      await navigator.clipboard.writeText(link);
+      await navigator.clipboard.writeText(link)
+      setCopied(true)
+      toast.success('Ссылка скопирована')
+      setTimeout(() => setCopied(false), 2000)
     } catch {
-      const ta = document.createElement("textarea");
-      ta.value = link;
-      ta.style.position = "fixed";
-      ta.style.left = "-9999px";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
+      toast.error('Не удалось скопировать ссылку')
     }
-    setCopied(true);
-    toast.success("Ссылка скопирована");
-    setTimeout(() => setCopied(false), 2000);
-  };
+  }
 
   const handleCloseDialog = () => {
-    setIsInviteOpen(false);
-    setInviteEmail("");
-    setInviteError(null);
-    setCreatedInvite(null);
-    setCopied(false);
-  };
-
-  const handleRemoveMember = async (memberId: string) => {
-    const member = members.find(m => m.id === memberId);
-    const result = await memberService.removeMember(memberId, currentTeamId!);
-    if (!result.ok) {
-      toast.error(result.error);
-      return;
+    if (isInviteSubmitting) {
+      return
     }
-    // Перечитываем список через сервис
-    invalidate();
-    toast.success(`Участник "${member?.userName ?? ""}" удалён из команды`);
-  };
 
-  const allItems = [
-    ...members.map(m => ({ type: 'member' as const, data: m })),
-    ...invitations.map(i => ({ type: 'invitation' as const, data: i })),
-  ];
+    setIsInviteOpen(false)
+    setInviteEmail('')
+    setInviteError(null)
+    setCreatedInvite(null)
+    setCopied(false)
+  }
 
-  const { totalPages, paginate, totalItems } = usePagination(allItems, PAGE_SIZE);
-  const pageItems = paginate(page);
+  const handleInviteDialogOpenChange = (open: boolean) => {
+    if (open) {
+      setIsInviteOpen(true)
+      return
+    }
+
+    handleCloseDialog()
+  }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start sm:items-center justify-between gap-3 flex-wrap">
+      <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Участники</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            {team.name} · {members.length} участников
-            {invitations.length > 0 && ` · ${invitations.length} ожидают`}
+          <h1 className="text-2xl font-bold text-foreground">Участники</h1>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {currentTeam.name} · {members.length} участников
+            {pendingInvitations.length > 0 ? ` · ${pendingInvitations.length} ожидают` : ''}
           </p>
         </div>
-        {/* RBAC: кнопка приглашения только для owner (can('member:invite')) */}
-        {can("member:invite") && (
-          <Dialog open={isInviteOpen} onOpenChange={setIsInviteOpen}>
+
+        {can('member:invite') ? (
+          <Dialog open={isInviteOpen} onOpenChange={handleInviteDialogOpenChange}>
             <DialogTrigger asChild>
               <Button disabled={atMemberLimit}>
-                <Plus className="size-4 mr-2" />
+                <Plus className="mr-2 size-4" />
                 Пригласить
               </Button>
             </DialogTrigger>
             <DialogContent>
               <DialogHeader>
-                <DialogTitle>
-                  {createdInvite ? "Приглашение отправлено!" : "Пригласить участника"}
-                </DialogTitle>
+                <DialogTitle>{createdInvite ? 'Приглашение создано' : 'Пригласить участника'}</DialogTitle>
                 <DialogDescription>
                   {createdInvite
-                    ? "Отправьте ссылку приглашённому"
-                    : "Введите email пользователя для приглашения в команду"}
+                    ? 'Письмо уже отправлено. При необходимости можно скопировать прямую ссылку ниже.'
+                    : 'Введите email пользователя для приглашения в команду.'}
                 </DialogDescription>
               </DialogHeader>
 
@@ -181,53 +238,43 @@ export function TeamMembersPage() {
                       type="email"
                       placeholder="user@example.com"
                       value={inviteEmail}
-                      onChange={(e) => { setInviteEmail(e.target.value); setInviteError(null); }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" && inviteEmail.trim()) handleSendInvite();
+                      onChange={(event) => {
+                        setInviteEmail(event.target.value)
+                        setInviteError(null)
                       }}
-                      autoFocus
+                      disabled={isInviteSubmitting}
                     />
-                    {inviteError && (
-                      <p className="text-xs text-red-600 mt-1">{inviteError}</p>
-                    )}
-                    <p className="text-xs text-gray-400 mt-1">
-                      Приглашённый получит те же права, кроме управления участниками
-                    </p>
+                    {inviteError ? <p className="mt-1 text-xs text-red-600">{inviteError}</p> : null}
                   </div>
                   <div className="flex justify-end gap-2">
-                    <Button variant="outline" onClick={handleCloseDialog}>Отмена</Button>
-                    <Button onClick={handleSendInvite} disabled={!inviteEmail.trim()}>
-                      <Mail className="size-4 mr-2" />
-                      Пригласить
+                    <Button variant="outline" onClick={handleCloseDialog} disabled={isInviteSubmitting}>Отмена</Button>
+                    <Button onClick={() => void handleSendInvite()} disabled={!inviteEmail.trim() || isInviteSubmitting}>
+                      {isInviteSubmitting ? (
+                        <>
+                          <Loader2 className="mr-2 size-4 animate-spin" />
+                          Отправка...
+                        </>
+                      ) : (
+                        <>
+                          <Mail className="mr-2 size-4" />
+                          Пригласить
+                        </>
+                      )}
                     </Button>
                   </div>
                 </div>
               ) : (
                 <div className="space-y-4">
-                  <Alert className="bg-amber-50 border-amber-200">
-                    <AlertDescription className="text-amber-800 text-xs">
-                      <strong>DEV:</strong> В реальном приложении ссылка придёт на email. Скопируйте ссылку ниже.
-                    </AlertDescription>
-                  </Alert>
                   <div className="space-y-2">
-                    <Label className="text-xs text-gray-500 mb-1 block">Ссылка-приглашение</Label>
+                    <Label className="block text-xs text-muted-foreground">Ссылка-приглашение</Label>
                     <div className="flex gap-2">
-                      <Input
-                        value={createdInvite.link}
-                        readOnly
-                        className="font-mono text-xs bg-gray-50"
-                        onClick={(e) => e.currentTarget.select()}
-                      />
-                      <Button
-                        variant={copied ? "outline" : "default"}
-                        size="sm"
-                        onClick={() => handleCopyLink(createdInvite.link)}
-                        className="flex-shrink-0"
-                      >
+                      <Input readOnly value={createdInvite.link} className="bg-muted/50 font-mono text-xs" />
+                      <Button variant={copied ? 'outline' : 'default'} size="sm" onClick={() => void handleCopyLink(createdInvite.link)}>
                         {copied ? <CheckCircle className="size-4" /> : <Copy className="size-4" />}
                       </Button>
                     </div>
                   </div>
+
                   <Button onClick={handleCloseDialog} variant="outline" className="w-full">
                     Закрыть
                   </Button>
@@ -235,38 +282,36 @@ export function TeamMembersPage() {
               )}
             </DialogContent>
           </Dialog>
-        )}
+        ) : null}
       </div>
 
-      {atMemberLimit && can("member:invite") && (
-        <Alert className="bg-amber-50 border-amber-200">
-          <AlertDescription className="text-amber-800 text-sm">
-            Достигнут лимит участников ({team.limits.maxMembers}). Для увеличения обратитесь к администратору.
+      {atMemberLimit && can('member:invite') ? (
+        <Alert className="border-amber-200 bg-amber-50">
+          <AlertDescription className="text-sm text-amber-800">
+            Достигнут лимит участников{maxMembers !== null ? ` (${maxMembers})` : ''}. Ожидающие приглашения тоже учитываются в лимите.
           </AlertDescription>
         </Alert>
-      )}
+      ) : null}
 
-      {/* Members — Mobile cards */}
-      <div className="md:hidden space-y-3">
+      <div className="space-y-3 md:hidden">
         {pageItems.map((item) => {
           if (item.type === 'member') {
-            const member = item.data;
-            const isMemberOwner = member.role === 'owner';
+            const member = item.data
+            const isOwner = member.role === 'owner'
             return (
-              <div key={member.id} className="bg-white rounded-lg border p-4">
+              <div key={member.userId} className="rounded-lg border border-border bg-card p-4">
                 <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <UserAvatar name={member.userName} />
+                  <div className="flex min-w-0 items-center gap-3">
+                    <UserAvatar name={member.displayName} />
                     <div className="min-w-0">
-                      <div className="font-medium text-sm text-gray-900 truncate">{member.userName}</div>
-                      <div className="text-xs text-gray-400 truncate">{member.userEmail}</div>
+                      <div className="truncate text-sm font-medium text-foreground">{member.displayName}</div>
+                      <div className="truncate text-xs text-muted-foreground">{member.email}</div>
                     </div>
                   </div>
-                  {/* RBAC: удаление только для owner */}
-                  {can("member:remove") && !isMemberOwner && (
+                  {can('member:remove') && !isOwner ? (
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
-                        <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700 shrink-0">
+                        <Button variant="ghost" size="sm" className="shrink-0 text-red-600 hover:text-red-700">
                           <X className="size-4" />
                         </Button>
                       </AlertDialogTrigger>
@@ -274,79 +319,88 @@ export function TeamMembersPage() {
                         <AlertDialogHeader>
                           <AlertDialogTitle>Удалить участника?</AlertDialogTitle>
                           <AlertDialogDescription>
-                            {member.userName} будет удалён из команды {team.name}.
+                            {member.displayName} будет удален из команды {currentTeam.name}.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>
                           <AlertDialogCancel>Отмена</AlertDialogCancel>
-                          <AlertDialogAction
-                            className="bg-red-600 hover:bg-red-700"
-                            onClick={() => handleRemoveMember(member.id)}
-                          >
+                          <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleRemoveMember(member.userId, member.displayName)}>
                             Удалить
                           </AlertDialogAction>
                         </AlertDialogFooter>
                       </AlertDialogContent>
                     </AlertDialog>
-                  )}
+                  ) : null}
                 </div>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  {isMemberOwner ? (
-                    <Badge variant="default" className="text-xs">Владелец</Badge>
-                  ) : (
-                    <Badge variant="secondary" className="text-xs">Участник</Badge>
-                  )}
-                  <Badge variant="outline" className="text-xs text-green-700 border-green-200 bg-green-50">
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <Badge variant={isOwner ? 'default' : 'secondary'} className="text-xs">
+                    {isOwner ? 'Владелец' : 'Участник'}
+                  </Badge>
+                  <Badge variant="outline" className="border-green-200 bg-green-50 text-xs text-green-700">
                     Активен
                   </Badge>
-                  <span className="text-xs text-gray-400">
-                    {new Date(member.createdAt).toLocaleDateString("ru-RU")}
-                  </span>
+                  <span className="text-xs text-muted-foreground">{new Date(member.joinedAt).toLocaleDateString('ru-RU')}</span>
                 </div>
               </div>
-            );
+            )
           }
-          const inv = item.data as Invitation;
-          const invLink = `${window.location.origin}/invite/${inv.inviteToken}`;
+
+          const invitation = item.data
+          const invitationLink = `${window.location.origin}/invite/${invitation.inviteToken}`
           return (
-            <div key={inv.id} className="bg-amber-50/30 dark:bg-amber-950/30 rounded-lg border p-4">
+            <div key={invitation.id} className="rounded-lg border bg-amber-50/30 p-4 dark:border-amber-800/30 dark:bg-amber-900/15">
               <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="size-8 rounded-full bg-gray-200 dark:bg-gray-700 text-gray-500 flex items-center justify-center text-sm flex-shrink-0">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
                     <Mail className="size-4" />
                   </div>
                   <div className="min-w-0">
-                    <div className="font-medium text-sm text-gray-700 truncate">{inv.email}</div>
-                    <div className="text-xs text-gray-400">Приглашён {inv.invitedByName}</div>
+                    <div className="truncate text-sm font-medium text-foreground">{invitation.email}</div>
+                    <div className="text-xs text-muted-foreground">Пригласил {invitation.invitedByName}</div>
                   </div>
                 </div>
-                {can("member:invite") && (
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button variant="ghost" size="sm" onClick={() => handleCopyLink(invLink)} title="Копировать ссылку">
+                {can('member:invite') ? (
+                  <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => void handleCopyLink(invitationLink)}>
                       <Copy className="size-4" />
                     </Button>
-                    <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" onClick={() => handleCancelInvite(inv.id)} title="Отменить">
-                      <X className="size-4" />
-                    </Button>
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700">
+                          <X className="size-4" />
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Отменить приглашение?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            Приглашение для {invitation.email} будет отменено и исчезнет из списка ожидающих.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Назад</AlertDialogCancel>
+                          <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleCancelInvite(invitation.id)}>
+                            Отменить приглашение
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
                   </div>
-                )}
+                ) : null}
               </div>
-              <div className="flex items-center gap-2 mt-2 flex-wrap">
-                <Badge variant="outline" className="text-xs">Участник</Badge>
-                <Badge variant="outline" className="text-xs text-amber-700 border-amber-200 bg-amber-50 gap-1">
-                  <Clock className="size-3" /> Ожидает
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Badge variant="outline" className="gap-1 border-amber-200 bg-amber-50 text-xs text-amber-700">
+                  <Clock className="size-3" />
+                  Ожидает
                 </Badge>
-                <span className="text-xs text-gray-400">
-                  {new Date(inv.createdAt).toLocaleDateString("ru-RU")}
-                </span>
+                <span className="text-xs text-muted-foreground">{new Date(invitation.createdAt).toLocaleDateString('ru-RU')}</span>
               </div>
             </div>
-          );
+          )
         })}
       </div>
 
-      {/* Desktop table */}
-      <div className="bg-white rounded-lg border hidden md:block">
+      <div className="hidden rounded-lg border border-border bg-card md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -354,45 +408,42 @@ export function TeamMembersPage() {
               <TableHead>Роль</TableHead>
               <TableHead>Статус</TableHead>
               <TableHead>Добавлен</TableHead>
-              {can("member:remove") && <TableHead className="w-[80px]">Действия</TableHead>}
+              {can('member:remove') ? <TableHead className="w-[100px]">Действия</TableHead> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
             {pageItems.map((item) => {
               if (item.type === 'member') {
-                const member = item.data;
-                const isMemberOwner = member.role === 'owner';
+                const member = item.data
+                const isOwner = member.role === 'owner'
+
                 return (
-                  <TableRow key={member.id}>
+                  <TableRow key={member.userId}>
                     <TableCell>
                       <div className="flex items-center gap-3">
-                        <UserAvatar name={member.userName} />
+                        <UserAvatar name={member.displayName} />
                         <div>
-                          <div className="font-medium text-sm text-gray-900">{member.userName}</div>
-                          <div className="text-xs text-gray-400">{member.userEmail}</div>
+                          <div className="font-medium text-foreground">{member.displayName}</div>
+                          <div className="text-xs text-muted-foreground">{member.email}</div>
                         </div>
                       </div>
                     </TableCell>
                     <TableCell>
-                      {isMemberOwner ? (
-                        <Badge variant="default" className="text-xs">Владелец</Badge>
-                      ) : (
-                        <Badge variant="secondary" className="text-xs">Участник</Badge>
-                      )}
+                      <Badge variant={isOwner ? 'default' : 'secondary'} className="text-xs">
+                        {isOwner ? 'Владелец' : 'Участник'}
+                      </Badge>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className="text-xs text-green-700 border-green-200 bg-green-50">
+                      <Badge variant="outline" className="border-green-200 bg-green-50 text-xs text-green-700">
                         Активен
                       </Badge>
                     </TableCell>
                     <TableCell>
-                      <span className="text-sm text-gray-500">
-                        {new Date(member.createdAt).toLocaleDateString("ru-RU")}
-                      </span>
+                      <span className="text-sm text-muted-foreground">{new Date(member.joinedAt).toLocaleDateString('ru-RU')}</span>
                     </TableCell>
-                    {can("member:remove") && (
+                    {can('member:remove') ? (
                       <TableCell>
-                        {!isMemberOwner && (
+                        {!isOwner ? (
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
                               <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700">
@@ -403,40 +454,36 @@ export function TeamMembersPage() {
                               <AlertDialogHeader>
                                 <AlertDialogTitle>Удалить участника?</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                  {member.userName} будет удалён из команды {team.name}.
+                                  {member.displayName} будет удален из команды {currentTeam.name}.
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
                               <AlertDialogFooter>
                                 <AlertDialogCancel>Отмена</AlertDialogCancel>
-                                <AlertDialogAction
-                                  className="bg-red-600 hover:bg-red-700"
-                                  onClick={() => handleRemoveMember(member.id)}
-                                >
+                                <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleRemoveMember(member.userId, member.displayName)}>
                                   Удалить
                                 </AlertDialogAction>
                               </AlertDialogFooter>
                             </AlertDialogContent>
                           </AlertDialog>
-                        )}
+                        ) : null}
                       </TableCell>
-                    )}
+                    ) : null}
                   </TableRow>
-                );
+                )
               }
 
-              // Pending invitation
-              const inv = item.data as Invitation;
-              const invLink = `${window.location.origin}/invite/${inv.inviteToken}`;
+              const invitation = item.data
+              const invitationLink = `${window.location.origin}/invite/${invitation.inviteToken}`
               return (
-                <TableRow key={inv.id} className="bg-amber-50/30 dark:bg-amber-950/30">
+                <TableRow key={invitation.id} className="bg-amber-50/30 dark:bg-amber-900/10">
                   <TableCell>
                     <div className="flex items-center gap-3">
-                      <div className="size-8 rounded-full bg-gray-200 text-gray-500 flex items-center justify-center text-sm flex-shrink-0">
+                      <div className="flex size-8 items-center justify-center rounded-full bg-muted text-muted-foreground">
                         <Mail className="size-4" />
                       </div>
                       <div>
-                        <div className="font-medium text-sm text-gray-700">{inv.email}</div>
-                        <div className="text-xs text-gray-400">Приглашён {inv.invitedByName}</div>
+                        <div className="font-medium text-foreground">{invitation.email}</div>
+                        <div className="text-xs text-muted-foreground">Пригласил {invitation.invitedByName}</div>
                       </div>
                     </div>
                   </TableCell>
@@ -444,56 +491,53 @@ export function TeamMembersPage() {
                     <Badge variant="outline" className="text-xs">Участник</Badge>
                   </TableCell>
                   <TableCell>
-                    <Badge variant="outline" className="text-xs text-amber-700 border-amber-200 bg-amber-50 gap-1">
-                      <Clock className="size-3" /> Ожидает
+                    <Badge variant="outline" className="gap-1 border-amber-200 bg-amber-50 text-xs text-amber-700">
+                      <Clock className="size-3" />
+                      Ожидает
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm text-gray-500">
-                      {new Date(inv.createdAt).toLocaleDateString("ru-RU")}
-                    </span>
+                    <span className="text-sm text-muted-foreground">{new Date(invitation.createdAt).toLocaleDateString('ru-RU')}</span>
                   </TableCell>
-                  {can("member:remove") && (
+                  {can('member:remove') ? (
                     <TableCell>
                       <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => handleCopyLink(invLink)} title="Копировать ссылку">
+                        <Button variant="ghost" size="sm" onClick={() => void handleCopyLink(invitationLink)}>
                           <Copy className="size-4" />
                         </Button>
-                        <Button
-                          variant="ghost" size="sm"
-                          className="text-red-600 hover:text-red-700"
-                          onClick={() => handleCancelInvite(inv.id)}
-                          title="Отменить приглашение"
-                        >
-                          <X className="size-4" />
-                        </Button>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700">
+                              <X className="size-4" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>Отменить приглашение?</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                Приглашение для {invitation.email} будет отменено и исчезнет из списка ожидающих.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Назад</AlertDialogCancel>
+                              <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleCancelInvite(invitation.id)}>
+                                Отменить приглашение
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
                       </div>
                     </TableCell>
-                  )}
+                  ) : null}
                 </TableRow>
-              );
+              )
             })}
           </TableBody>
         </Table>
       </div>
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={totalItems}
-        pageSize={PAGE_SIZE}
-      />
-
-      {/* Роли — информация */}
-      <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm">
-        <div className="font-medium text-blue-900 mb-1">Роли в команде</div>
-        <ul className="space-y-1 text-blue-700">
-          <li><span className="font-medium">Владелец</span> — создатель команды. Может приглашать и удалять участников.</li>
-          <li><span className="font-medium">Участник</span> — приглашённый по email. Те же права, кроме управления людьми.</li>
-          <li className="text-blue-600 text-xs mt-2">Ожидающие приглашения занимают слот участника до отмены.</li>
-        </ul>
-      </div>
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={totalItems} pageSize={PAGE_SIZE} />
     </div>
-  );
+  )
 }
+

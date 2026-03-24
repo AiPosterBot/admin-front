@@ -1,174 +1,160 @@
-import { useState } from "react";
-import { Link, useNavigate } from "react-router";
-import { Search, Filter, Image } from "lucide-react";
-import { Input } from "../components/ui/input";
-import { Badge } from "../components/ui/badge";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
-import { Pagination, usePagination } from "../components/Pagination";
-import { useTeam } from "../context/TeamContext";
-import { useTeamItems } from "../hooks/useTeamItems";
-import { Loader2 } from "lucide-react";
-import { TagFilter } from "../components/TagFilter";
-// ── Service layer ────────────────────────────────────────────────────
-import * as sourceService from "../services/sourceService";
-import * as postService from "../services/postService";
-import * as teamService from "../services/teamService";
+import { useEffect, useState } from 'react'
+import { Link, useNavigate } from 'react-router'
+import { Filter, Image, Loader2, Search } from 'lucide-react'
 
-const PAGE_SIZE = 10;
+import { Pagination } from '../components/Pagination'
+import { TagFilter } from '../components/TagFilter'
+import { Badge } from '../components/ui/badge'
+import { MediaStatusHint } from '../components/MediaStatusHint'
+import { Input } from '../components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { useTeam } from '../context/TeamContext'
+import { useDebouncedValue } from '../hooks/useDebouncedValue'
+import { useTeamItems } from '../hooks/useTeamItems'
+import * as sourceService from '../services/sourceService'
 
-type PublishFilter = "all" | "published" | "unpublished";
+const PAGE_SIZE = 10
+
+type PublishFilter = 'all' | 'published' | 'unpublished'
 
 export function ItemsPage() {
-  const { currentTeamId } = useTeam();
-  const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
+  const { currentTeamId, currentTeam } = useTeam()
+  const navigate = useNavigate()
 
-  // ── Реактивный список через хук ──────────────────────────────────────
-  const { state: itemsState } = useTeamItems();
+  const [searchQuery, setSearchQuery] = useState('')
+  const [sourceFilter, setSourceFilter] = useState('all')
+  const [publishFilter, setPublishFilter] = useState<PublishFilter>('all')
+  const [page, setPage] = useState(1)
+  const [sourceTagFilter, setSourceTagFilter] = useState<string[]>([])
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 400)
 
-  const [searchQuery, setSearchQuery] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("all");
-  const [publishFilter, setPublishFilter] = useState<PublishFilter>("all");
-  const [page, setPage] = useState(1);
-  const [sourceTagFilter, setSourceTagFilter] = useState<string[]>([]);
+  useEffect(() => {
+    if (!currentTeamId) {
+      return
+    }
 
-  const teamSourceTags = sourceService.getTeamSourceTags(currentTeamId ?? "");
-  const teamSources = sourceService.getTeamSourcesList(currentTeamId ?? "");
-  const teamPostedItems = postService.getTeamPostsList(currentTeamId ?? "");
+    void Promise.all([sourceService.primeTeamSourceTags(currentTeamId), sourceService.getTeamSources(currentTeamId)])
+  }, [currentTeamId])
 
-  if (!team) {
-    return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">Команда не выбрана</h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
-      </div>
-    );
+  const { state: itemsState } = useTeamItems({
+    page,
+    limit: PAGE_SIZE,
+    sourceId: sourceFilter !== 'all' ? sourceFilter : undefined,
+    published: publishFilter,
+    sourceTagIds: sourceTagFilter,
+    q: debouncedSearchQuery.trim() || undefined,
+  })
+
+  const teamSourceTags = currentTeamId ? sourceService.getTeamSourceTags(currentTeamId) : []
+  const teamSources = currentTeamId ? sourceService.getTeamSourcesList(currentTeamId) : []
+  const hasActiveFilters = searchQuery.length > 0 || sourceFilter !== 'all' || publishFilter !== 'all' || sourceTagFilter.length > 0
+
+  const resetFilters = () => {
+    setSearchQuery('')
+    setSourceFilter('all')
+    setPublishFilter('all')
+    setSourceTagFilter([])
+    setPage(1)
   }
 
-  if (itemsState.status === "loading" || itemsState.status === "idle") {
+  if (!currentTeam) {
+    return (
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-foreground">Команда не выбрана</h2>
+        <p className="text-muted-foreground">Выберите команду в верхнем меню.</p>
+      </div>
+    )
+  }
+
+  if (itemsState.status === 'loading' || itemsState.status === 'idle') {
     return (
       <div className="flex items-center justify-center py-24">
-        <Loader2 className="size-6 animate-spin text-gray-400" />
+        <Loader2 className="size-6 animate-spin text-muted-foreground" />
       </div>
-    );
+    )
   }
 
-  const teamItems = itemsState.status === "success" ? itemsState.data : [];
-
-  // Precompute publication map
-  const publicationsByItem = new Map<string, typeof teamPostedItems>();
-  for (const p of teamPostedItems) {
-    const arr = publicationsByItem.get(p.itemId) || [];
-    arr.push(p);
-    publicationsByItem.set(p.itemId, arr);
+  if (itemsState.status === 'error') {
+    return <div className="rounded-lg border border-border bg-card p-6 text-sm text-destructive">{itemsState.error}</div>
   }
 
-  const publishedCount = teamItems.filter(i => (publicationsByItem.get(i.id)?.length ?? 0) > 0).length;
-  const unpublishedCount = teamItems.length - publishedCount;
-
-  const filteredItems = teamItems.filter((item) => {
-    const matchesSearch =
-      !searchQuery ||
-      item.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.content.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesSource = sourceFilter === "all" || item.sourceId === sourceFilter;
-    const publications = publicationsByItem.get(item.id) || [];
-    const isPublished = publications.length > 0;
-    const matchesPublish =
-      publishFilter === "all" ||
-      (publishFilter === "published" && isPublished) ||
-      (publishFilter === "unpublished" && !isPublished);
-    const matchesSrcTag = sourceTagFilter.length === 0 || (() => {
-      const tags = sourceService.getSourceTagsById(item.sourceId);
-      return tags.some(t => sourceTagFilter.includes(t.id));
-    })();
-    return matchesSearch && matchesSource && matchesPublish && matchesSrcTag;
-  });
-
-  const handleFilterChange = (setter: (v: string) => void, value: string) => {
-    setter(value);
-    setPage(1);
-  };
-
-  const { totalPages, paginate, totalItems: paginationTotal } = usePagination(filteredItems, PAGE_SIZE);
-  const pageItems = paginate(page);
-
-  const publishFilterOptions: { value: PublishFilter; label: string; count: number }[] = [
-    { value: "all", label: "Все", count: teamItems.length },
-    { value: "published", label: "Опубликованные", count: publishedCount },
-    { value: "unpublished", label: "Не опубликованные", count: unpublishedCount },
-  ];
+  const itemsResult = itemsState.data
+  const items = itemsResult.data
+  const totalItems = itemsResult.total
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE))
+  const publishCounts = itemsResult.facets?.publishCounts ?? { all: totalItems, published: 0, unpublished: 0 }
+  const publishOptions: Array<{ value: PublishFilter; label: string; count: number }> = [
+    { value: 'all', label: 'Все', count: publishCounts.all },
+    { value: 'published', label: 'Опубликованные', count: publishCounts.published },
+    { value: 'unpublished', label: 'Не опубликованные', count: publishCounts.unpublished },
+  ]
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Контент</h1>
-        <p className="text-gray-500 text-sm mt-0.5">
-          {team.name} · все собранные материалы из источников
+        <h1 className="text-2xl font-bold text-foreground">Материалы</h1>
+        <p className="mt-0.5 text-sm text-muted-foreground">
+          {currentTeam.name} · {totalItems} материалов
         </p>
       </div>
 
-      {/* Filters */}
       <div className="space-y-3">
-        {/* Row 1: toggle filters + reset */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <Filter className="size-3.5 text-gray-400 shrink-0" />
-            <div className="flex items-center gap-1 flex-wrap">
-              {publishFilterOptions.map(({ value, label, count }) => (
+            <Filter className="size-4 text-muted-foreground" />
+            <div className="flex flex-wrap items-center gap-1">
+              {publishOptions.map((option) => (
                 <button
-                  key={value}
-                  onClick={() => handleFilterChange(setPublishFilter as (v: string) => void, value)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                    publishFilter === value
-                      ? "bg-gray-900 text-white"
-                      : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                  key={option.value}
+                  type="button"
+                  onClick={() => {
+                    setPublishFilter(option.value)
+                    setPage(1)
+                  }}
+                  className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+                    publishFilter === option.value
+                      ? 'bg-foreground text-background shadow-sm'
+                      : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                   }`}
                 >
-                  {label}
-                  <span className={`text-xs tabular-nums ${publishFilter === value ? "text-gray-300" : "text-gray-400"}`}>
-                    {count}
+                  <span>{option.label}</span>
+                  <span className={`ml-1 text-xs tabular-nums ${publishFilter === option.value ? 'opacity-70' : 'text-muted-foreground'}`}>
+                    {option.count}
                   </span>
                 </button>
               ))}
             </div>
           </div>
-          {(publishFilter !== "all" || sourceFilter !== "all" || searchQuery || sourceTagFilter.length > 0) && (
-            <button
-              onClick={() => {
-                setPublishFilter("all");
-                setSourceFilter("all");
-                setSearchQuery("");
-                setSourceTagFilter([]);
-                setPage(1);
-              }}
-              className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-            >
+
+          {hasActiveFilters && (
+            <button type="button" onClick={resetFilters} className="text-xs text-muted-foreground transition-colors hover:text-foreground">
               Сбросить
             </button>
           )}
         </div>
 
-        {/* Row 2: search + source dropdown */}
-        <div className="flex flex-col sm:flex-row gap-3">
+        <div className="flex flex-col gap-3 sm:flex-row">
           <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Поиск по заголовку или контенту..."
               value={searchQuery}
-              onChange={(e) => handleFilterChange(setSearchQuery, e.target.value)}
+              onChange={(event) => {
+                setSearchQuery(event.target.value)
+                setPage(1)
+              }}
+              placeholder="Поиск по заголовку или тексту..."
               className="pl-9"
             />
           </div>
-          <Select value={sourceFilter} onValueChange={v => handleFilterChange(setSourceFilter, v)}>
-            <SelectTrigger className="w-full sm:w-48">
+
+          <Select
+            value={sourceFilter}
+            onValueChange={(value) => {
+              setSourceFilter(value)
+              setPage(1)
+            }}
+          >
+            <SelectTrigger className="w-full sm:w-56">
               <SelectValue placeholder="Все источники" />
             </SelectTrigger>
             <SelectContent>
@@ -180,131 +166,109 @@ export function ItemsPage() {
               ))}
             </SelectContent>
           </Select>
+
           <TagFilter
             tags={teamSourceTags}
             selectedTagIds={sourceTagFilter}
-            onChange={(ids) => { setSourceTagFilter(ids); setPage(1); }}
+            onChange={(ids) => {
+              setSourceTagFilter(ids)
+              setPage(1)
+            }}
             label="Теги источников"
           />
         </div>
       </div>
 
-      {/* Items List */}
-      <div className="bg-white rounded-lg border divide-y">
-        {pageItems.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            <div className="text-gray-300 text-4xl mb-3">📄</div>
+      <div className="divide-y divide-border rounded-lg border border-border bg-card">
+        {items.length === 0 ? (
+          <div className="py-12 text-center text-muted-foreground">
+            <div className="mb-3 text-4xl text-muted-foreground/50">📄</div>
             <div className="font-medium">Материалы не найдены</div>
-            {(publishFilter !== "all" || sourceFilter !== "all" || searchQuery) && (
-              <button
-                onClick={() => {
-                  setPublishFilter("all");
-                  setSourceFilter("all");
-                  setSearchQuery("");
-                  setPage(1);
-                }}
-                className="text-blue-600 text-sm mt-2 hover:underline"
-              >
+            {hasActiveFilters && (
+              <button type="button" onClick={resetFilters} className="mt-2 text-sm text-primary hover:underline">
                 Сбросить фильтры
               </button>
             )}
           </div>
         ) : (
-          pageItems.map((item) => {
-            const publications = publicationsByItem.get(item.id) || [];
-            const isPublished = publications.length > 0;
+          items.map((item) => {
+            const publicationsCount = item.publicationsCount ?? item.publicationsPreview?.length ?? 0
+            const isPublished = publicationsCount > 0
+            const lastPublishedAt = item.publicationsPreview?.[0]?.postedAt ?? item.publishedAt
 
             return (
               <div
                 key={item.id}
-                className="flex items-start gap-4 px-4 py-4 hover:bg-gray-50/80 transition-colors cursor-pointer"
+                className="flex cursor-pointer items-start gap-4 px-4 py-4 transition-colors hover:bg-muted/40"
                 onClick={() => navigate(`/items/${item.id}`)}
               >
-                {/* Thumbnail */}
-                {item.mediaUrl ? (
-                  <img
-                    src={item.mediaUrl}
-                    alt=""
-                    className="w-16 h-16 object-cover rounded flex-shrink-0 bg-gray-100"
-                  />
+                {item.mediaUrl && item.mediaPreviewAvailable !== false ? (
+                  <img src={item.mediaUrl} alt="" className="h-16 w-16 flex-shrink-0 rounded bg-muted object-cover" />
                 ) : (
-                  <div className="w-16 h-16 rounded flex-shrink-0 bg-gray-50 border border-gray-100 flex items-center justify-center">
-                    <Image className="size-5 text-gray-300" />
+                  <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center rounded border border-border bg-muted">
+                    <Image className="size-5 text-muted-foreground" />
                   </div>
                 )}
 
-                {/* Content */}
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-start justify-between gap-3 mb-1">
-                    <h3 className="font-medium text-sm text-gray-900 line-clamp-1">{item.title}</h3>
-                    <div className="flex-shrink-0">
-                      {isPublished ? (
-                        <Badge variant="default" className="text-xs whitespace-nowrap">
-                          {publications.length > 1
-                            ? `${publications.length} канала`
-                            : "Опубликован"}
-                        </Badge>
-                      ) : (
-                        <Badge variant="secondary" className="text-xs">Не опубликован</Badge>
-                      )}
-                    </div>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-start justify-between gap-3">
+                    <h3 className="line-clamp-1 text-sm font-medium text-foreground">{item.title}</h3>
+                    {isPublished ? (
+                      <Badge variant="default" className="whitespace-nowrap text-xs">
+                        Опубликован
+                      </Badge>
+                    ) : (
+                      <Badge variant="secondary" className="whitespace-nowrap text-xs">
+                        Не опубликован
+                      </Badge>
+                    )}
                   </div>
 
-                  <p className="text-gray-500 text-sm mb-2 line-clamp-2">{item.content}</p>
+                  <p className="mb-2 line-clamp-2 text-sm text-muted-foreground">{item.content}</p>
+                  <MediaStatusHint
+                    hasMedia={item.hasMedia}
+                    mediaPreviewAvailable={item.mediaPreviewAvailable}
+                    mediaPreviewRestrictedReason={item.mediaPreviewRestrictedReason}
+                    className="mb-2"
+                  />
 
-                  {/* Publication channels */}
-                  {publications.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {publications.map((pub) => (
-                        <div
-                          key={pub.id}
-                          className="flex items-center gap-1.5 bg-green-50 border border-green-200 rounded-md px-2 py-0.5 text-xs"
+                  {item.publicationsPreview && item.publicationsPreview.length > 0 && (
+                    <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                      {item.publicationsPreview.map((publication) => (
+                        <Link
+                          key={publication.id}
+                          to={`/channels/${publication.channelId}`}
+                          onClick={(event) => event.stopPropagation()}
                         >
-                          <div className="size-1.5 rounded-full bg-green-500" />
-                          <Link
-                            to={`/channels/${pub.channelId}`}
-                            className="text-green-700 hover:underline font-medium"
-                            onClick={e => e.stopPropagation()}
-                          >
-                            {pub.channelName}
-                          </Link>
-                          <span className="text-green-500">·</span>
-                          <span className="text-green-600">
-                            {new Date(pub.postedAt).toLocaleTimeString("ru-RU", {
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })}
-                          </span>
-                        </div>
+                          <Badge variant="outline" className="text-xs font-normal hover:border-primary/60 hover:text-primary">
+                            {publication.channelName}
+                          </Badge>
+                        </Link>
                       ))}
                     </div>
                   )}
 
-                  {/* Meta */}
-                  <div className="flex items-center gap-2 text-xs text-gray-400">
-                    <Link
-                      to={`/sources/${item.sourceId}`}
-                      className="text-blue-500 hover:underline"
-                    >
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                    <Link to={`/sources/${item.sourceId}`} className="text-primary hover:underline" onClick={(event) => event.stopPropagation()}>
                       {item.sourceName}
                     </Link>
                     <span>·</span>
-                    <span>{new Date(item.extractedAt).toLocaleString("ru-RU")}</span>
+                    <span>{new Date(item.extractedAt).toLocaleString('ru-RU')}</span>
+                    {lastPublishedAt && (
+                      <>
+                        <span>·</span>
+                        <span>Опубликован: {new Date(item.publishedAt).toLocaleString('ru-RU')}</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
-            );
+            )
           })
         )}
       </div>
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={paginationTotal}
-        pageSize={PAGE_SIZE}
-      />
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={totalItems} pageSize={PAGE_SIZE} />
     </div>
-  );
+  )
 }

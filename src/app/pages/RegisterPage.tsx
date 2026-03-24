@@ -1,292 +1,248 @@
-import { useState } from "react";
-import { useNavigate, Link, useSearchParams } from "react-router";
-import { Sparkles, Eye, EyeOff, CheckCircle, ShieldCheck } from "lucide-react";
-import { Button } from "../components/ui/button";
-import { Input } from "../components/ui/input";
-import { Label } from "../components/ui/label";
-import { Badge } from "../components/ui/badge";
-import { Alert, AlertDescription } from "../components/ui/alert";
-import {
-  registerUser, setCurrentUser, mockAdminInvites, mockInvitations,
-} from "../data/mock-data";
+import { useEffect, useState } from 'react'
+import { useNavigate, Link, useSearchParams } from 'react-router'
+import { Sparkles, Eye, EyeOff, CheckCircle, Mail } from 'lucide-react'
+import { Button } from '../components/ui/button'
+import { Input } from '../components/ui/input'
+import { Label } from '../components/ui/label'
+import { Alert, AlertDescription } from '../components/ui/alert'
+import { PublicThemeToggle } from '../components/PublicThemeToggle'
+import { useAuth } from '../context/AuthContext'
 
 export function RegisterPage() {
-  const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
+  const { registerStart, registerVerify, registerUser } = useAuth()
 
-  // token can be admin invite token (adm_tok_*) or team invite token (tok_*)
-  const rawToken = searchParams.get("token") || "";
-  const prefillEmail = searchParams.get("email") || "";
+  const rawToken = searchParams.get('token') || ''
+  const prefillEmail = searchParams.get('email') || ''
 
-  // Determine which type of invite this is
-  const isAdminInvite = rawToken.startsWith("adm_tok_");
-  const isTeamInvite = rawToken.startsWith("tok_") && !isAdminInvite;
+  const [step, setStep] = useState<'form' | 'code' | 'done'>('form')
+  const [displayName, setDisplayName] = useState('')
+  const [email, setEmail] = useState(prefillEmail)
+  const [password, setPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [code, setCode] = useState('')
+  const [error, setError] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isResendingCode, setIsResendingCode] = useState(false)
+  const [resendCooldownSec, setResendCooldownSec] = useState(0)
 
-  // Resolve invite info for display
-  const adminInvite = isAdminInvite
-    ? mockAdminInvites.find(i => i.inviteToken === rawToken && i.status === "pending")
-    : null;
-  const teamInvite = isTeamInvite
-    ? mockInvitations.find(i => i.inviteToken === rawToken && i.status === "pending")
-    : null;
+  useEffect(() => {
+    if (resendCooldownSec <= 0) {
+      return
+    }
 
-  const [step, setStep] = useState<"form" | "verify">("form");
-  const [displayName, setDisplayName] = useState("");
-  const [email, setEmail] = useState(prefillEmail);
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [showPassword, setShowPassword] = useState(false);
-  const [verifyCode, setVerifyCode] = useState("");
-  const [error, setError] = useState("");
+    const timer = window.setTimeout(() => {
+      setResendCooldownSec((current) => Math.max(0, current - 1))
+    }, 1000)
 
-  const handleSubmitForm = (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
+    return () => {
+      window.clearTimeout(timer)
+    }
+  }, [resendCooldownSec])
 
+  const validateForm = () => {
     if (!displayName.trim()) {
-      setError("Введите имя");
-      return;
+      setError('Введите имя')
+      return false
     }
+
+    if (!email.trim()) {
+      setError('Введите email')
+      return false
+    }
+
     if (password.length < 8) {
-      setError("Пароль должен быть не менее 8 символов");
-      return;
+      setError('Пароль должен быть не менее 8 символов')
+      return false
     }
+
     if (password !== confirmPassword) {
-      setError("Пароли не совпадают");
-      return;
+      setError('Пароли не совпадают')
+      return false
     }
 
-    // Move to verification step
-    setStep("verify");
-  };
+    return true
+  }
 
-  const handleVerify = (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
+  const handleSendCode = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setError('')
 
-    if (verifyCode.length < 4) {
-      setError("Введите код из письма (минимум 4 символа)");
-      return;
+    if (!validateForm()) {
+      return
     }
+
+    setIsSubmitting(true)
+    try {
+      await registerStart(email.trim())
+      setStep('code')
+      setResendCooldownSec(30)
+    } catch (registerError: any) {
+      setError(registerError.message || 'Не удалось отправить код подтверждения')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleResendCode = async () => {
+    setError('')
+    setIsResendingCode(true)
 
     try {
-      // Actually create the user
-      const result = registerUser(
-        email.trim(),
-        displayName.trim(),
-        password,
-        isAdminInvite ? rawToken : undefined,
-        isTeamInvite ? rawToken : undefined,
-      );
-
-      // Auto-login
-      setCurrentUser(result.user.id);
-      localStorage.setItem("isLoggedIn", "true");
-
-      // Redirect based on context
-      if (result.teamInviteToken) {
-        // Came from team invite → go to accept page
-        navigate(`/invite/${result.teamInviteToken}`);
-      } else if (result.adminInviteAccepted) {
-        // Admin invited → user can create team → onboarding
-        navigate("/onboarding");
-      } else {
-        // Generic registration (no invite) → go home
-        navigate("/");
-      }
-    } catch (err: any) {
-      setError(err.message || "Ошибка регистрации");
+      await registerStart(email.trim())
+      setResendCooldownSec(30)
+    } catch (resendError: any) {
+      setError(resendError.message || 'Не удалось отправить код повторно')
+    } finally {
+      setIsResendingCode(false)
     }
-  };
+  }
 
-  if (step === "verify") {
+  const handleVerifyAndCreate = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setError('')
+    setIsSubmitting(true)
+
+    try {
+      const result = await registerVerify(email.trim(), code.trim())
+
+      await registerUser({
+        email: email.trim(),
+        displayName: displayName.trim(),
+        password,
+        token: rawToken || undefined,
+        verificationToken: result.verificationToken,
+      })
+
+      setStep('done')
+      navigate('/', { replace: true })
+    } catch (verifyError: any) {
+      setError(verifyError.message || 'Не удалось подтвердить email')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  if (step === 'done') {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-md">
-          <div className="bg-white rounded-lg shadow-xl p-8">
-            <div className="text-center mb-6">
-              <div className="mx-auto mb-4 size-16 bg-green-100 rounded-full flex items-center justify-center">
-                <CheckCircle className="size-8 text-green-600" />
-              </div>
-              <h1 className="text-2xl font-bold text-gray-900 mb-1">Подтвердите email</h1>
-              <p className="text-gray-600 text-sm">
-                Мы отправили код подтверждения на <strong>{email}</strong>
-              </p>
-            </div>
-
-            {/* DEV hint */}
-            <Alert className="mb-4 bg-amber-50 border-amber-200">
-              <AlertDescription className="text-amber-800 text-xs">
-                <strong>DEV:</strong> В реальном приложении код придёт на email.
-                Для тестирования введите любой 4+ символьный код (напр. <strong>1234</strong>).
-              </AlertDescription>
-            </Alert>
-
-            {error && (
-              <Alert variant="destructive" className="mb-4">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-
-            <form onSubmit={handleVerify} className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="code" className="mb-1 block">Код подтверждения</Label>
-                <Input
-                  id="code"
-                  placeholder="1234"
-                  value={verifyCode}
-                  onChange={(e) => setVerifyCode(e.target.value)}
-                  autoFocus
-                  className="text-center text-lg tracking-widest"
-                />
-              </div>
-
-              <Button type="submit" className="w-full" size="lg">
-                Подтвердить и завершить регистрацию
-              </Button>
-            </form>
-
-            <button
-              onClick={() => { setStep("form"); setError(""); }}
-              className="mt-4 w-full text-center text-sm text-gray-500 hover:text-gray-700"
-            >
-              ← Назад к форме
-            </button>
+      <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4 dark:from-gray-950 dark:to-gray-900">
+        <div className="w-full max-w-md rounded-lg bg-white p-8 text-center shadow-xl dark:bg-gray-900 dark:shadow-2xl dark:shadow-black/40">
+          <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/40">
+            <CheckCircle className="size-8 text-green-600" />
           </div>
+          <h1 className="mb-2 text-2xl font-bold text-gray-900 dark:text-gray-100">Аккаунт создан</h1>
+          <p className="text-sm text-gray-600 dark:text-gray-400">Переходим в рабочее пространство...</p>
         </div>
       </div>
-    );
+    )
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4 dark:from-gray-950 dark:to-gray-900">
+      <PublicThemeToggle />
       <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-xl p-8">
-          <div className="text-center mb-6">
-            <div className="mx-auto mb-4 size-16 bg-blue-100 rounded-full flex items-center justify-center">
-              <Sparkles className="size-8 text-blue-600" />
+        <div className="rounded-lg border border-gray-200 bg-white p-8 shadow-xl dark:border-gray-800 dark:bg-gray-900 dark:shadow-2xl dark:shadow-black/40">
+          <div className="mb-6 text-center">
+            <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-full bg-blue-100 dark:bg-blue-900/40">
+              {step === 'form' ? <Sparkles className="size-8 text-blue-600 dark:text-blue-400" /> : <Mail className="size-8 text-blue-600 dark:text-blue-400" />}
             </div>
-            <h1 className="text-2xl font-bold text-gray-900 mb-1">Регистрация</h1>
-            <p className="text-gray-600 text-sm">
-              {adminInvite
-                ? "Вы получили приглашение от администратора. Создайте аккаунт."
-                : teamInvite
-                  ? `Вы приглашены в команду. Создайте аккаунт для ${prefillEmail}.`
-                  : "Создайте аккаунт AI Poster"}
+            <h1 className="mb-1 text-2xl font-bold text-gray-900 dark:text-gray-100">{step === 'form' ? 'Регистрация' : 'Подтвердите email'}</h1>
+            <p className="text-sm text-gray-600 dark:text-gray-400">
+              {step === 'form'
+                ? rawToken
+                  ? 'Создайте аккаунт по приглашению'
+                  : 'Создайте аккаунт AI Poster'
+                : `Мы отправили код на ${email}`}
             </p>
-            <Badge variant="outline" className="mt-2">
-              DEV MODE
-            </Badge>
           </div>
 
-          {/* Admin invite badge */}
-          {adminInvite && (
-            <div className="mb-4 bg-green-50 border border-green-200 rounded-lg p-3 flex items-start gap-2">
-              <ShieldCheck className="size-5 text-green-600 flex-shrink-0 mt-0.5" />
-              <div className="text-sm text-green-800">
-                <div className="font-medium">Инвайт от администратора</div>
-                <div className="text-xs text-green-600 mt-0.5">
-                  После регистрации вы сможете создать свою команду
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Team invite badge */}
-          {teamInvite && (
-            <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-start gap-2">
-              <Sparkles className="size-5 text-blue-600 flex-shrink-0 mt-0.5" />
-              <div className="text-sm text-blue-800">
-                <div className="font-medium">
-                  Приглашение от {teamInvite.invitedByName}
-                </div>
-                <div className="text-xs text-blue-600 mt-0.5">
-                  Зарегистрируйтесь и примите приглашение в команду
-                </div>
-              </div>
-            </div>
-          )}
-
-          {error && (
+          {error ? (
             <Alert variant="destructive" className="mb-4">
               <AlertDescription>{error}</AlertDescription>
             </Alert>
-          )}
+          ) : null}
 
-          <form onSubmit={handleSubmitForm} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="name" className="mb-1 block">Имя</Label>
-              <Input
-                id="name"
-                placeholder="Ваше имя"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                required
-                autoFocus
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="email" className="mb-1 block">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                disabled={!!prefillEmail}
-              />
-              {!!prefillEmail && (
-                <p className="text-xs text-gray-500">
-                  Email привязан к приглашению и не может быть изменён
-                </p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="password" className="mb-1 block">Пароль</Label>
-              <div className="relative">
-                <Input
-                  id="password"
-                  type={showPassword ? "text" : "password"}
-                  placeholder="Минимум 8 символов"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  minLength={8}
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                >
-                  {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                </button>
+          {step === 'form' ? (
+            <form onSubmit={handleSendCode} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="name" className="mb-1 block">Имя</Label>
+                <Input id="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoFocus />
               </div>
-            </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="confirm" className="mb-1 block">Подтвердите пароль</Label>
-              <Input
-                id="confirm"
-                type="password"
-                placeholder="Повторите пароль"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                required
-              />
-            </div>
+              <div className="space-y-2">
+                <Label htmlFor="email" className="mb-1 block">Email</Label>
+                <Input id="email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} disabled={Boolean(prefillEmail)} />
+              </div>
 
-            <Button type="submit" className="w-full" size="lg">
-              Зарегистрироваться
-            </Button>
-          </form>
+              <div className="space-y-2">
+                <Label htmlFor="password" className="mb-1 block">Пароль</Label>
+                <div className="relative">
+                  <Input
+                    id="password"
+                    type={showPassword ? 'text' : 'password'}
+                    placeholder="Минимум 8 символов"
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword((value) => !value)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
+                  >
+                    {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="confirm" className="mb-1 block">Подтвердите пароль</Label>
+                <Input id="confirm" type="password" placeholder="Повторите пароль" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} />
+              </div>
+
+              <Button type="submit" className="w-full" size="lg" disabled={isSubmitting}>
+                {isSubmitting ? 'Отправка кода...' : 'Продолжить'}
+              </Button>
+            </form>
+          ) : null}
+
+          {step === 'code' ? (
+            <form onSubmit={handleVerifyAndCreate} className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="code" className="mb-1 block">Код подтверждения</Label>
+                <Input id="code" placeholder="123456" value={code} onChange={(event) => setCode(event.target.value)} autoFocus className="text-center text-lg tracking-widest" />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-200">
+                <span>Код не пришел?</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void handleResendCode()}
+                  disabled={isSubmitting || isResendingCode || resendCooldownSec > 0}
+                  className="h-auto px-0 text-blue-600 hover:bg-transparent hover:text-blue-700 dark:text-blue-300 dark:hover:bg-transparent dark:hover:text-blue-200"
+                >
+                  {isResendingCode ? 'Отправляем...' : resendCooldownSec > 0 ? `Отправить повторно через ${resendCooldownSec}с` : 'Отправить повторно'}
+                </Button>
+              </div>
+
+              <div className="flex gap-2">
+                <Button type="button" variant="outline" className="flex-1" onClick={() => setStep('form')} disabled={isSubmitting}>
+                  Назад
+                </Button>
+                <Button type="submit" className="flex-1" size="lg" disabled={isSubmitting || !code.trim()}>
+                  {isSubmitting ? 'Проверка...' : 'Подтвердить и создать'}
+                </Button>
+              </div>
+            </form>
+          ) : null}
 
           <div className="mt-6 text-center">
-            <p className="text-sm text-gray-500">
-              Уже есть аккаунт?{" "}
-              <Link to="/login" className="text-blue-600 hover:text-blue-800 font-medium">
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              Уже есть аккаунт?{' '}
+              <Link to="/login" className="font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300">
                 Войти
               </Link>
             </p>
@@ -294,5 +250,6 @@ export function RegisterPage() {
         </div>
       </div>
     </div>
-  );
+  )
 }
+

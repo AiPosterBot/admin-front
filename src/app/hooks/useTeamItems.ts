@@ -1,28 +1,38 @@
-// ══════════════════════════════════════════════════════════════════════
-//  useTeamItems — реактивный список материалов текущей команды.
-// ══════════════════════════════════════════════════════════════════════
+import { useCallback } from 'react'
 
-import { useTeam } from '../context/TeamContext';
-import { useAsync } from '../lib/asyncState';
-import { getTeamItems } from '../services/itemService';
-import type { Item } from '../data/mock-data';
-import type { AsyncState } from '../lib/asyncState';
+import type { AsyncState } from '../lib/asyncState'
+import { useAsync } from '../lib/asyncState'
+import { useTeam } from '../context/TeamContext'
+import { listTeamItems, type ListTeamItemsOptions, type TeamItemsListResult } from '../services/itemService'
 
 export interface UseTeamItemsReturn {
-  state: AsyncState<Item[]>;
-  invalidate: () => void;
+  state: AsyncState<TeamItemsListResult>
+  invalidate: () => void
 }
 
-export function useTeamItems(): UseTeamItemsReturn {
-  const { currentTeamId } = useTeam();
+export function useTeamItems(options: ListTeamItemsOptions = {}): UseTeamItemsReturn {
+  const { currentTeamId } = useTeam()
 
-  const { state, invalidate } = useAsync<Item[]>(
-    () =>
-      currentTeamId
-        ? getTeamItems(currentTeamId)
-        : Promise.resolve(null),
-    [currentTeamId],
-  );
+  const fetchItems = useCallback(() => {
+    if (!currentTeamId) {
+      return Promise.resolve(null)
+    }
 
-  return { state, invalidate };
+    return listTeamItems(currentTeamId, options)
+  }, [
+    currentTeamId,
+    options.page,
+    options.limit,
+    options.sourceId,
+    options.sourceIds?.join(','),
+    options.published,
+    options.q,
+    options.from,
+    options.to,
+    options.sourceTagIds?.join(','),
+  ])
+
+  const { state, invalidate } = useAsync<TeamItemsListResult>(fetchItems, [fetchItems], { keepPreviousData: true })
+
+  return { state, invalidate }
 }

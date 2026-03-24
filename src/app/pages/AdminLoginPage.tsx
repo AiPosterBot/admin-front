@@ -4,66 +4,61 @@ import { Shield, Eye, EyeOff } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import { Badge } from "../components/ui/badge";
 import { Alert, AlertDescription } from "../components/ui/alert";
-import { mockAdmins, setCurrentAdmin } from "../data/mock-data";
+import { PublicThemeToggle } from "../components/PublicThemeToggle";
+import { useAuth } from "../context/AuthContext";
 
 export function AdminLoginPage() {
   const navigate = useNavigate();
+  const { loginAdmin } = useAuth();
+
   const [nickname, setNickname] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
     setError("");
+    setIsSubmitting(true);
 
-    const admin = mockAdmins.find(
-      a => a.nickname === nickname && a.password === password && a.isActive
-    );
-
-    if (!admin) {
-      setError("Неверный никнейм или пароль");
-      return;
+    try {
+      await loginAdmin({ nickname, password });
+      navigate("/admin/dashboard");
+    } catch (loginError: any) {
+      setError(loginError.message || "Не удалось войти");
+    } finally {
+      setIsSubmitting(false);
     }
-
-    setCurrentAdmin(admin.id);
-    localStorage.setItem("isAdminLoggedIn", "true");
-    navigate("/admin/dashboard");
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-red-50 to-gray-100 dark:from-gray-950 dark:to-gray-900 flex items-center justify-center p-4">
+    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-red-50 to-gray-100 p-4 dark:from-gray-950 dark:to-gray-900">
+      <PublicThemeToggle />
       <div className="w-full max-w-md">
-        <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl dark:shadow-2xl dark:shadow-black/40 p-8">
-          <div className="text-center mb-8">
-            <div className="mx-auto mb-4 size-16 bg-red-100 rounded-full flex items-center justify-center">
+        <div className="rounded-lg border border-gray-200 bg-white p-8 shadow-xl dark:border-gray-800 dark:bg-gray-900 dark:shadow-2xl dark:shadow-black/40">
+          <div className="mb-8 text-center">
+            <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/40">
               <Shield className="size-8 text-red-600" />
             </div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-1">Админ-панель</h1>
-            <p className="text-gray-600 dark:text-gray-400 text-sm">AI Poster — вход для администраторов</p>
-            <Badge variant="outline" className="mt-2">
-              DEV MODE
-            </Badge>
+            <h1 className="mb-1 text-2xl font-bold text-gray-900 dark:text-gray-100">Админ-панель</h1>
+            <p className="text-sm text-gray-600 dark:text-gray-400">AI Poster — вход для администраторов</p>
           </div>
 
-          {error && (
-            <Alert variant="destructive" className="mb-4">
-              <AlertDescription>{error}</AlertDescription>
+          {error ? (
+            <Alert
+              variant="destructive"
+              className="mb-4 border-red-500/40 bg-red-950/40 text-red-200 dark:border-red-500/40 dark:bg-red-950/40"
+            >
+              <AlertDescription className="text-red-200 dark:text-red-200">{error}</AlertDescription>
             </Alert>
-          )}
+          ) : null}
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="nickname" className="mb-1 block">Никнейм</Label>
-              <Input
-                id="nickname"
-                placeholder="root"
-                value={nickname}
-                onChange={(e) => setNickname(e.target.value)}
-                autoFocus
-              />
+              <Input id="nickname" value={nickname} onChange={(event) => setNickname(event.target.value)} autoFocus />
             </div>
 
             <div className="space-y-2">
@@ -72,42 +67,27 @@ export function AdminLoginPage() {
                 <Input
                   id="password"
                   type={showPassword ? "text" : "password"}
-                  placeholder="••••••••"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(event) => setPassword(event.target.value)}
                 />
                 <button
                   type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  onClick={() => setShowPassword((value) => !value)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300"
                 >
                   {showPassword ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
             </div>
 
-            <Button type="submit" className="w-full" size="lg">
-              Войти
+            <Button type="submit" className="w-full" size="lg" disabled={isSubmitting}>
+              {isSubmitting ? "Вход..." : "Войти"}
             </Button>
           </form>
 
-          <div className="mt-6 p-4 bg-red-50 rounded-lg">
-            <p className="text-sm text-red-900 font-medium mb-2">
-              Тестовые аккаунты:
-            </p>
-            <ul className="text-sm text-red-800 space-y-1">
-              {mockAdmins.map(a => (
-                <li key={a.id}>
-                  <strong>{a.nickname}</strong> / {a.password}
-                  {a.isRoot && " (Root)"}
-                </li>
-              ))}
-            </ul>
-          </div>
-
           <div className="mt-4 text-center">
-            <Link to="/login" className="text-sm text-gray-500 hover:text-gray-700">
-              Вход для пользователей →
+            <Link to="/login" className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300">
+              Вход для пользователей
             </Link>
           </div>
         </div>

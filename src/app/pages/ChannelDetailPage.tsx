@@ -6,7 +6,7 @@ import {
   ExternalLink, Trash2, Eye, Heart, CalendarIcon, X, LayoutDashboard,
   History, Settings, Database, Clock, Zap, Calendar as CalendarSchedule,
   TrendingUp, FileText, AlertCircle, Plus, Newspaper, Pause, Play,
-  Users, Loader2, Bot, Sparkles, DollarSign, ChevronDown, ChevronUp,
+  Users, Loader2, Bot, Sparkles, DollarSign, ChevronDown, ChevronUp, Send,
   ShieldAlert,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
@@ -14,6 +14,9 @@ import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
 import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
+import { Input } from "../components/ui/input";
+import { NumericInput } from "../components/ui/numeric-input";
+import { Switch } from "../components/ui/switch";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "../components/ui/select";
@@ -30,20 +33,19 @@ import {
   Popover, PopoverContent, PopoverTrigger,
 } from "../components/ui/popover";
 import { Calendar } from "../components/ui/calendar";
-import { SchedulePicker, scheduleToCron, scheduleToHuman } from "../components/SchedulePicker";
+import { createDefaultSchedule, SchedulePicker, scheduleToHuman } from "../components/SchedulePicker";
+import { getTimezoneLabel, getZonedDateParts } from "../lib/timezones";
 import { Progress } from "../components/ui/progress";
-import { Pagination, usePagination } from "../components/Pagination";
-import {
-  type Item,
-} from "../data/mock-data";
+import { Pagination } from "../components/Pagination";
+import type { Item } from "../types/domain";
 import { useTeam } from "../context/TeamContext";
 import type { DateRange } from "react-day-picker";
 // ── Service + guard layer ─────────────────────────────────────────────
 import * as channelService from "../services/channelService";
 import * as sourceService from "../services/sourceService";
-import * as postService from "../services/postService";
-import * as itemService from "../services/itemService";
-import * as teamService from "../services/teamService";
+import { useTeamPosts } from "../hooks/useTeamPosts";
+import { useTeamItems } from "../hooks/useTeamItems";
+import { useAsync } from "../lib/asyncState";
 import { useTeamScopedEntity } from "../hooks/useTeamScopedEntity";
 import { TeamScopeGuard } from "../components/TeamScopeGuard";
 import { TagBadge } from "../components/TagBadge";
@@ -60,15 +62,29 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
   telegram: "TG",
 };
 
+function startOfDayIso(date?: Date) {
+  if (!date) return undefined;
+  const value = new Date(date);
+  value.setHours(0, 0, 0, 0);
+  return value.toISOString();
+}
+
+function endOfDayIso(date?: Date) {
+  if (!date) return undefined;
+  const value = new Date(date);
+  value.setHours(23, 59, 59, 999);
+  return value.toISOString();
+}
+
 export function ChannelDetailPage() {
   const { channelId } = useParams();
-  const { currentTeamId } = useTeam();
+  const { currentTeam, currentTeamId } = useTeam();
   const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
+  const team = currentTeam;
 
   // ── Team scope guard: хук загружает канал через сервис и
   //    автоматически редиректит если он не принадлежит текущей команде ──
-  const { state: channelState } = useTeamScopedEntity(
+  const { state: channelState, invalidate: invalidateChannel } = useTeamScopedEntity(
     () => channelService.getChannelById(channelId!, currentTeamId!),
     [channelId, currentTeamId],
     "/channels",
@@ -78,125 +94,60 @@ export function ChannelDetailPage() {
 
   // ── UI State ────────────────────────────────────────────────────────
   const [showTestDialog, setShowTestDialog] = useState(false);
+  const [botUsername, setBotUsername] = useState<string | null>(null);
   const [testStep, setTestStep] = useState<"select" | "generating" | "result">("select");
   const [selectedTestItem, setSelectedTestItem] = useState<Item | null>(null);
   const [testGeneratedContent, setTestGeneratedContent] = useState("");
-  const [testLLMStats, setTestLLMStats] = useState({ model: "", tokens: 0, cost: 0, latencyMs: 0 });
+  const [testPreviewContentFormat, setTestPreviewContentFormat] = useState<"plain" | "telegram_html">("telegram_html");
+  const [testLLMStats, setTestLLMStats] = useState({ model: "", tokens: 0, cost: 0, latencyMs: 0, usedLlm: true });
+  const [testPreviewTraceId, setTestPreviewTraceId] = useState<string | null>(null);
   const [testProgress, setTestProgress] = useState(0);
-  const [publishMode, setPublishMode] = useState(channel?.publishMode || "instant");
+  const [isPublishingTestPost, setIsPublishingTestPost] = useState(false);
+  const [, setDataVersion] = useState(0);
+  const [publishMode, setPublishMode] = useState(channel?.publishMode || "periodic");
+  const [publishIntervalMin, setPublishIntervalMin] = useState(() => resolveChannelPublishIntervalMinutes(channel));
   // ИСПРАВЛЕНО: читаем contentStrategy из channel, а не хардкод "newest"
   const [contentStrategy, setContentStrategy] = useState<"newest" | "agent">(channel?.contentStrategy || "newest");
-  const [scheduleValue, setScheduleValue] = useState({
-    days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-    times: channel?.cron ? parseCronTimes(channel.cron) : ["09:00"],
-    timezone: channel?.timezone || "UTC",
-  });
+  const [scheduleValue, setScheduleValue] = useState(() => resolveChannelSchedule(channel));
 
   // ── Settings form state (controlled) ──────────────────────────────────
   const [postStyle, setPostStyle] = useState(channel?.postStyle || "");
+  const [disableMedia, setDisableMedia] = useState(channel?.disableMedia ?? false);
   const [agentInstructions, setAgentInstructions] = useState(channel?.agentInstructions || "");
+  const [skipLlmRewrite, setSkipLlmRewrite] = useState(channel?.skipLlmRewrite ?? false);
 
   const [isSaving, setIsSaving] = useState(false);
+  const [isRefreshingMetadata, setIsRefreshingMetadata] = useState(false);
 
   // Track initial values for dirty detection
   const initialSettings = useRef({
     postStyle: channel?.postStyle || "",
+    disableMedia: channel?.disableMedia ?? false,
     agentInstructions: channel?.agentInstructions || "",
+    skipLlmRewrite: channel?.skipLlmRewrite ?? false,
 
-    publishMode: channel?.publishMode || "instant",
+    publishMode: channel?.publishMode || "periodic",
+    publishIntervalMin: resolveChannelPublishIntervalMinutes(channel),
     contentStrategy: (channel?.contentStrategy || "newest") as "newest" | "agent",
-    scheduleValue: {
-      days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-      times: channel?.cron ? parseCronTimes(channel.cron) : ["09:00"],
-      timezone: channel?.timezone || "UTC",
-    },
+    scheduleValue: resolveChannelSchedule(channel),
   });
 
   const hasUnsavedChanges =
     postStyle !== initialSettings.current.postStyle ||
+    disableMedia !== initialSettings.current.disableMedia ||
     agentInstructions !== initialSettings.current.agentInstructions ||
+    skipLlmRewrite !== initialSettings.current.skipLlmRewrite ||
 
     publishMode !== initialSettings.current.publishMode ||
+    publishIntervalMin !== initialSettings.current.publishIntervalMin ||
     contentStrategy !== initialSettings.current.contentStrategy ||
     JSON.stringify(scheduleValue) !== JSON.stringify(initialSettings.current.scheduleValue);
 
-  const handleSaveSettings = useCallback(() => {
-    setIsSaving(true);
-    // Simulate API call
-    setTimeout(() => {
-      // Обновляем через сервис (patch mock-data под капотом)
-      if (channel) {
-        channelService.updateChannelSettings(channel.id, currentTeamId!, {
-          postStyle,
-          agentInstructions,
-          contentStrategy,
-          publishMode: publishMode as "instant" | "scheduled",
-          cron: publishMode === "scheduled" ? scheduleToCron(scheduleValue) : undefined,
-          timezone: publishMode === "scheduled" ? scheduleValue.timezone : undefined,
-        });
-      }
-      // Update initial ref
-      initialSettings.current = {
-        postStyle,
-        agentInstructions,
-        publishMode,
-        contentStrategy,
-        scheduleValue: { ...scheduleValue },
-      };
-      setIsSaving(false);
-      toast.success("Настройки сохранены", {
-        description: "Изменения канала применены успешно",
-      });
-    }, 600);
-  }, [channel, postStyle, agentInstructions, publishMode, contentStrategy, scheduleValue]);
-
-  const handleDiscardSettings = useCallback(() => {
-    setPostStyle(initialSettings.current.postStyle);
-    setAgentInstructions(initialSettings.current.agentInstructions);
-
-    setPublishMode(initialSettings.current.publishMode);
-    setContentStrategy(initialSettings.current.contentStrategy);
-    setScheduleValue({ ...initialSettings.current.scheduleValue });
-    toast("Изменения отменены");
-  }, []);
   const [historyPage, setHistoryPage] = useState(1);
   const [dateRange, setDateRange] = useState<DateRange | undefined>(undefined);
   const [statusFilter, setStatusFilter] = useState<"all" | "success" | "failed">("all");
   const [calendarOpen, setCalendarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("overview");
-
-  // ── Channel active state (pause/resume) ─────────────────────────────
-  // Инициал��зируется после загрузки канала через useEffect
-  const [isChannelActive, setIsChannelActive] = useState(true);
-  // Синхронизируем все form-состояния при загрузке канала через хук
-  useEffect(() => {
-    if (channelState.status !== "success") return;
-    const ch = channelState.data;
-    setIsChannelActive(ch.isActive);
-    setPublishMode(ch.publishMode || "instant");
-    setContentStrategy(ch.contentStrategy || "newest");
-    setScheduleValue({
-      days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-      times: ch.cron ? parseCronTimes(ch.cron) : ["09:00"],
-      timezone: ch.timezone || "UTC",
-    });
-    setPostStyle(ch.postStyle || "");
-    setAgentInstructions(ch.agentInstructions || "");
-    initialSettings.current = {
-      postStyle: ch.postStyle || "",
-      agentInstructions: ch.agentInstructions || "",
-      publishMode: ch.publishMode || "instant",
-      contentStrategy: (ch.contentStrategy || "newest") as "newest" | "agent",
-      scheduleValue: {
-        days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
-        times: ch.cron ? parseCronTimes(ch.cron) : ["09:00"],
-        timezone: ch.timezone || "UTC",
-      },
-    };
-  }, [channelState.status]); // eslint-disable-line react-hooks/exhaustive-deps
-  const [showPauseConfirm, setShowPauseConfirm] = useState(false);
-
-  // ── Sources link/unlink state ──────────────────────────────────────
   const [linkedSourceIds, setLinkedSourceIds] = useState<string[]>(
     channelService.getLinkedSourceIds(channelId ?? "")
   );
@@ -204,6 +155,195 @@ export function ChannelDetailPage() {
   const [sourceToUnlink, setSourceToUnlink] = useState<string | null>(null);
   const [, forceTagUpdate] = useState(0);
   const [linkDialogTagFilter, setLinkDialogTagFilter] = useState<string[]>([]);
+
+  const { state: historyPostsState, invalidate: invalidateHistoryPosts } = useTeamPosts({
+    page: historyPage,
+    limit: HISTORY_PAGE_SIZE,
+    channelId: channelId,
+    status: statusFilter !== "all" ? statusFilter : undefined,
+    from: startOfDayIso(dateRange?.from),
+    to: endOfDayIso(dateRange?.to),
+  });
+  const { state: recentPostsState, invalidate: invalidateRecentPosts } = useTeamPosts({
+    page: 1,
+    limit: OVERVIEW_RECENT_COUNT,
+    channelId: channelId,
+  });
+  const { state: testItemsState, invalidate: invalidateTestItems } = useTeamItems({
+    page: 1,
+    limit: 20,
+    sourceIds: linkedSourceIds,
+  });
+  const fetchChannelStats = useCallback(() => {
+    if (!channelId) {
+      return Promise.resolve(null);
+    }
+
+    return channelService.getChannelStats(channelId);
+  }, [channelId]);
+  const { state: channelStatsState, invalidate: invalidateChannelStats } = useAsync(fetchChannelStats, [fetchChannelStats]);
+
+  const refreshChannelData = useCallback(async () => {
+    if (!currentTeamId || !channelId) {
+      return;
+    }
+
+    await Promise.all([
+      channelService.getChannelById(channelId, currentTeamId),
+      sourceService.getTeamSources(currentTeamId),
+    ]);
+
+    setLinkedSourceIds(channelService.getLinkedSourceIds(channelId));
+    invalidateHistoryPosts();
+    invalidateRecentPosts();
+    invalidateChannelStats();
+    invalidateTestItems();
+    setDataVersion((version) => version + 1);
+  }, [channelId, currentTeamId, invalidateChannelStats, invalidateHistoryPosts, invalidateRecentPosts, invalidateTestItems]);
+
+  const handleSaveSettings = useCallback(async () => {
+    if (!channel || !currentTeamId) {
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      const saveResult = await channelService.updateChannelSettings(channel.id, currentTeamId, {
+        postStyle,
+        disableMedia,
+        agentInstructions,
+        skipLlmRewrite,
+        contentStrategy,
+        publishMode: publishMode as "periodic" | "scheduled" | "every_material",
+        publishIntervalSec: publishMode === "scheduled" ? undefined : publishIntervalMin * 60,
+        scheduleJson: scheduleValue,
+      });
+
+      if (saveResult.ok === false) {
+        toast.error(saveResult.error);
+        return;
+      }
+
+      initialSettings.current = {
+        postStyle,
+        disableMedia,
+        agentInstructions,
+        skipLlmRewrite,
+        publishMode,
+        publishIntervalMin,
+        contentStrategy,
+        scheduleValue: structuredClone(scheduleValue),
+      };
+
+      invalidateChannel();
+      await refreshChannelData();
+
+      toast.success("Настройки сохранены", {
+        description: "Изменения канала применены успешно",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }, [agentInstructions, channel, contentStrategy, currentTeamId, disableMedia, invalidateChannel, postStyle, publishIntervalMin, publishMode, refreshChannelData, scheduleValue, skipLlmRewrite]);
+
+  const handleDiscardSettings = useCallback(() => {
+    setPostStyle(initialSettings.current.postStyle);
+    setDisableMedia(initialSettings.current.disableMedia);
+    setAgentInstructions(initialSettings.current.agentInstructions);
+    setSkipLlmRewrite(initialSettings.current.skipLlmRewrite);
+
+    setPublishMode(initialSettings.current.publishMode);
+    setPublishIntervalMin(initialSettings.current.publishIntervalMin);
+    setContentStrategy(initialSettings.current.contentStrategy);
+    setScheduleValue(structuredClone(initialSettings.current.scheduleValue));
+    toast("Изменения отменены");
+  }, []);
+
+  const handleRefreshMetadata = useCallback(async () => {
+    if (!channel || !currentTeamId) {
+      return;
+    }
+
+    setIsRefreshingMetadata(true);
+    try {
+      const result = await channelService.refreshChannelMetadata(channel.id, currentTeamId);
+      if (result.ok === false) {
+        toast.error(result.error);
+        return;
+      }
+
+      invalidateChannel();
+      await refreshChannelData();
+      toast.success(result.data.reused ? "Обновление уже стоит в очереди" : "Обновление канала поставлено в очередь", {
+        description: "Метаданные канала обновятся после выполнения job refresh_channel_metadata.",
+      });
+    } finally {
+      setIsRefreshingMetadata(false);
+    }
+  }, [channel, currentTeamId, invalidateChannel, refreshChannelData]);
+
+  // ── Channel active state (pause/resume) ─────────────────────────────
+  // Инициализируется после загрузки канала через useEffect
+  const [isChannelActive, setIsChannelActive] = useState(true);
+  // Синхронизируем все form-состояния при загрузке канала через хук
+  useEffect(() => {
+    if (channelState.status !== "success") return;
+    const ch = channelState.data;
+    setIsChannelActive(ch.isActive);
+    setPublishMode(ch.publishMode || "periodic");
+    setPublishIntervalMin(resolveChannelPublishIntervalMinutes(ch));
+    setContentStrategy(ch.contentStrategy || "newest");
+    setScheduleValue(resolveChannelSchedule(ch));
+    setPostStyle(ch.postStyle || "");
+    setDisableMedia(ch.disableMedia ?? false);
+    setAgentInstructions(ch.agentInstructions || "");
+    setSkipLlmRewrite(ch.skipLlmRewrite ?? false);
+    setLinkedSourceIds(channelService.getLinkedSourceIds(ch.id));
+    initialSettings.current = {
+      postStyle: ch.postStyle || "",
+      disableMedia: ch.disableMedia ?? false,
+      agentInstructions: ch.agentInstructions || "",
+      skipLlmRewrite: ch.skipLlmRewrite ?? false,
+      publishMode: ch.publishMode || "periodic",
+      publishIntervalMin: resolveChannelPublishIntervalMinutes(ch),
+      contentStrategy: (ch.contentStrategy || "newest") as "newest" | "agent",
+      scheduleValue: resolveChannelSchedule(ch),
+    };
+  }, [channelState]);
+  useEffect(() => {
+    void refreshChannelData();
+
+    const timer = window.setInterval(() => {
+      void refreshChannelData();
+    }, 15000);
+
+    return () => window.clearInterval(timer);
+  }, [refreshChannelData]);
+
+  useEffect(() => {
+    if (!currentTeamId) {
+      return;
+    }
+
+    let isMounted = true;
+    void channelService.getTelegramBotInfo(currentTeamId)
+      .then((result) => {
+        if (isMounted) {
+          setBotUsername(result.botUsername ?? null);
+        }
+      })
+      .catch(() => {
+        if (isMounted) {
+          setBotUsername(null);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentTeamId]);
+  const [showPauseConfirm, setShowPauseConfirm] = useState(false);
 
   if (!team) {
     return (
@@ -217,108 +357,101 @@ export function ChannelDetailPage() {
 
   // ── Computed: sources (через сервис) ────────────────────────────────
   const allTeamSources = sourceService.getTeamSourcesList(currentTeamId!);
-  const linkedSources = allTeamSources.filter(s => linkedSourceIds.includes(s.id));
+  const linkedSources = channelId ? channelService.getLinkedSources(channelId) : [];
   const availableToLink = allTeamSources.filter(s => !linkedSourceIds.includes(s.id));
 
-  // ── Computed: publications (через сервис) ────────────────────────────
-  const allPostedItems = postService.getPostsByChannelId(channelId ?? "")
-    .sort((a, b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
+  const historyPostsResult = historyPostsState.status === "success" ? historyPostsState.data : null;
+  const recentPostsResult = recentPostsState.status === "success" ? recentPostsState.data : null;
+  const channelStats = channelStatsState.status === "success" ? channelStatsState.data : null;
+  const testItemsResult = testItemsState.status === "success" ? testItemsState.data : null;
 
-  const now = new Date();
-  const todayStr = now.toISOString().split("T")[0];
-  const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-  const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-  const successItems = allPostedItems.filter(p => p.status === "success");
-  const postsToday  = successItems.filter(p => p.postedAt.startsWith(todayStr)).length;
-  const postsWeek   = successItems.filter(p => new Date(p.postedAt) >= weekAgo).length;
-  const postsMonth  = successItems.filter(p => new Date(p.postedAt) >= monthAgo).length;
-  const postsTotal  = successItems.length;
-  const recentPosts = allPostedItems.slice(0, OVERVIEW_RECENT_COUNT);
+  const allPostedItems = historyPostsResult?.data ?? [];
+  const postsToday = channelStats?.postsToday ?? 0;
+  const postsWeek = channelStats?.postsWeek ?? 0;
+  const postsMonth = channelStats?.postsMonth ?? 0;
+  const postsTotal = channelStats?.postsTotal ?? 0;
+  const recentPosts = recentPostsResult?.data ?? [];
+  const publicationsBySource = new Map<string, number>((channelStats?.publicationsBySource ?? []).map((entry) => [entry.sourceId, entry.count]));
 
-  // Публикаций из каждого источника в этом канале
-  const pubsBySource = (sourceId: string) =>
-    successItems.filter(p => p.sourceId === sourceId).length;
+  const pubsBySource = (sourceId: string) => publicationsBySource.get(sourceId) ?? 0;
 
   // ── Schedule ────────────────────────────────────────────────────────
   const nextPublication = publishMode === "scheduled"
     ? getNextPublication(scheduleValue)
-    : null;
+    : getNextIntervalPublication(channel?.lastPublishedAt, publishIntervalMin * 60);
   const scheduleHuman = publishMode === "scheduled" ? scheduleToHuman(scheduleValue) : "";
 
-  // ── Filtered history ───────────────────────────────────────────���─────
-  const filteredPostedItems = allPostedItems.filter(p => {
-    if (statusFilter !== "all" && p.status !== statusFilter) return false;
-    if (dateRange?.from) {
-      const d = new Date(p.postedAt);
-      const from = new Date(dateRange.from); from.setHours(0, 0, 0, 0);
-      if (d < from) return false;
-    }
-    if (dateRange?.to) {
-      const d = new Date(p.postedAt);
-      const to = new Date(dateRange.to); to.setHours(23, 59, 59, 999);
-      if (d > to) return false;
-    }
-    return true;
-  });
+  // ── Filtered history ───────────────────────────────────────────────
+  const filteredPostedItems = allPostedItems;
   const hasActiveFilters = statusFilter !== "all" || !!dateRange;
-
-  const { totalPages: historyTotalPages, paginate: historyPaginate, totalItems: historyTotal } =
-    usePagination(filteredPostedItems, HISTORY_PAGE_SIZE);
-  const pageHistory = historyPaginate(historyPage);
+  const historyTotal = historyPostsResult?.total ?? 0;
+  const historyTotalPages = Math.max(1, Math.ceil(historyTotal / HISTORY_PAGE_SIZE));
+  const pageHistory = filteredPostedItems;
 
   // ── Test generation materials (через сервис) ─────────────────────────
-  const testItems = itemService.getTeamItemsList(currentTeamId!)
-    .filter(i => linkedSourceIds.includes(i.sourceId))
-    .sort((a, b) => new Date(b.extractedAt).getTime() - new Date(a.extractedAt).getTime())
-    .slice(0, 20);
+  const testItems = testItemsResult?.data ?? [];
 
   const handleOpenTestDialog = () => {
     setTestStep("select");
     setSelectedTestItem(null);
     setTestGeneratedContent("");
+    setTestPreviewContentFormat("telegram_html");
+    setTestLLMStats({ model: "", tokens: 0, cost: 0, latencyMs: 0, usedLlm: true });
+    setTestPreviewTraceId(null);
     setTestProgress(0);
     setShowTestDialog(false);
   };
 
-  const handleRunTestGeneration = () => {
-    if (!selectedTestItem) return;
+  const handleRunTestGeneration = async () => {
+    if (!selectedTestItem || !channel) return;
     setTestStep("generating");
-    setTestProgress(0);
+    setTestProgress(15);
     setShowTestDialog(true);
+    const previewResult = await channelService.generateChannelTestingPreview(channel.id, selectedTestItem.id);
+    if (previewResult.ok === false) {
+      toast.error(previewResult.error);
+      setTestStep("select");
+      setShowTestDialog(false);
+      setTestProgress(0);
+      return;
+    }
 
-    // Simulate LLM generation with progress
-    const totalDuration = 2500;
-    const steps = 20;
-    const stepDuration = totalDuration / steps;
-    let step = 0;
-
-    const interval = setInterval(() => {
-      step++;
-      setTestProgress(Math.min(Math.round((step / steps) * 100), 100));
-      if (step >= steps) {
-        clearInterval(interval);
-        // Generate mock result
-        const generatedPost =
-          `${selectedTestItem.title}\n\n` +
-          `${selectedTestItem.content.substring(0, 300)}...\n\n` +
-          `#news #tech #AI`;
-        const latency = 1800 + Math.round(Math.random() * 1200);
-        const promptTokens = 400 + Math.round(Math.random() * 300);
-        const completionTokens = 200 + Math.round(Math.random() * 200);
-        const totalTokens = promptTokens + completionTokens;
-        setTestGeneratedContent(generatedPost);
-        setTestLLMStats({
-          model: "gpt-4o",
-          tokens: totalTokens,
-          cost: parseFloat((totalTokens * 0.00003).toFixed(4)),
-          latencyMs: latency,
-        });
-        setTestStep("result");
-      }
-    }, stepDuration);
+    setTestProgress(100);
+    setTestGeneratedContent(previewResult.data.generatedContent);
+    setTestPreviewContentFormat(previewResult.data.generatedContentFormat);
+    setTestPreviewTraceId(previewResult.data.llm.traceId ?? null);
+    setTestLLMStats({
+      model: previewResult.data.llm.traceId ? previewResult.data.llm.model : "Без AI",
+      tokens: previewResult.data.llm.totalTokens ?? 0,
+      cost: previewResult.data.llm.costUsd ?? 0,
+      latencyMs: previewResult.data.llm.latencyMs ?? 0,
+      usedLlm: Boolean(previewResult.data.llm.traceId),
+    });
+    setTestStep("result");
   };
 
-  // ── Handlers ──────────────────────────���──────────────────────────────
+  const handlePublishSelectedTestItem = async () => {
+    if (!selectedTestItem || !channel) return;
+
+    setIsPublishingTestPost(true);
+    const publishResult = await channelService.publishChannelItem(channel.id, selectedTestItem.id, {
+      previewGeneratedContent: testGeneratedContent,
+      previewGeneratedContentFormat: testPreviewContentFormat,
+      previewTraceId: testPreviewTraceId,
+    });
+    setIsPublishingTestPost(false);
+
+    if (publishResult.ok === false) {
+      toast.error(publishResult.error);
+      return;
+    }
+
+    invalidateChannel();
+    await refreshChannelData();
+    toast.success(publishResult.data.reused ? "Публикация уже стоит в очереди" : "Публикация поставлена в очередь");
+  };
+
+  // ── Handlers ───────────────────────────────────────────────────────
 
   const handleDelete = async () => {
     if (!channel) return;
@@ -331,9 +464,11 @@ export function ChannelDetailPage() {
   const handleToggleActive = async () => {
     if (!channel) return;
     const newState = !isChannelActive;
-    // Мутируем через сервис (mock-data patch под капотом)
+    // Мутируем через сервисный слой
     await channelService.toggleChannelActive(channel.id, currentTeamId!, newState);
     setIsChannelActive(newState);
+    invalidateChannel();
+    await refreshChannelData();
     toast.success(newState ? "Канал возобновлён" : "Канал поставлен на паузу");
   };
 
@@ -341,7 +476,8 @@ export function ChannelDetailPage() {
     const source = allTeamSources.find(s => s.id === sourceId);
     await channelService.linkSource(channelId!, sourceId);
     setLinkedSourceIds(prev => [...prev, sourceId]);
-    setShowLinkDialog(false);
+    invalidateChannel();
+    await refreshChannelData();
     toast.success(`Источник "${source?.name ?? sourceId}" привязан`);
   };
 
@@ -350,11 +486,16 @@ export function ChannelDetailPage() {
     const source = linkedSources.find(s => s.id === sourceToUnlink);
     await channelService.unlinkSource(channelId!, sourceToUnlink);
     setLinkedSourceIds(prev => prev.filter(id => id !== sourceToUnlink));
+    invalidateChannel();
+    await refreshChannelData();
     setSourceToUnlink(null);
-    toast.success(`Источ��ик "${source?.name ?? ""}" отвязан`);
+    toast.success(`Источник "${source?.name ?? ""}" отвязан`);
   };
 
   const sourceBeingUnlinked = linkedSources.find(s => s.id === sourceToUnlink);
+  const channelPublicUrl = channel ? channelService.getChannelPublicUrl(channel) : null;
+  const channelDisplayLabel = channel ? channelService.getChannelDisplayLabel(channel) : "";
+  const channelTechnicalId = channel ? channelService.getChannelTechnicalId(channel) : "";
 
   // ════════════════════════════════════════════════════════════════════
   return (
@@ -387,22 +528,31 @@ export function ChannelDetailPage() {
               <Badge variant="default">Активен</Badge>
             )}
           </div>
-          <p className="text-gray-500 text-sm">
-            <a
-              href={`https://t.me/${channel.telegramId.replace("@", "")}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="bg-gray-100 px-1.5 py-0.5 rounded text-blue-600 hover:text-blue-700 text-sm"
-            >
-              {channel.telegramId}
-            </a>
-            {" · "}{team.name}
-            {" · "}
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-gray-500 text-sm">
+            {channelPublicUrl ? (
+              <a
+                href={channelPublicUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="bg-gray-100 px-1.5 py-0.5 rounded text-blue-600 hover:text-blue-700 text-sm"
+              >
+                {channelDisplayLabel}
+              </a>
+            ) : (
+              <span className="bg-gray-100 px-1.5 py-0.5 rounded text-gray-700 text-sm">
+                {channelDisplayLabel}
+              </span>
+            )}
+            <span>·</span>
+            <span>ID: <span className="font-mono text-gray-700">{channelTechnicalId}</span></span>
+            <span>·</span>
+            <span>{team.name}</span>
+            <span>·</span>
             <span className="inline-flex items-center gap-1">
               <Users className="size-3 inline" />
               {channel.subscribersCount.toLocaleString("ru-RU")} подписчиков
             </span>
-          </p>
+          </div>
           <div className="flex items-center gap-1.5 flex-wrap mt-1">
             {channelService.getChannelTagsById(channel.id).map(t => (
               <TagBadge key={t.id} name={t.name} color={t.color} />
@@ -470,7 +620,7 @@ export function ChannelDetailPage() {
                 <AlertDialogDescription>
                   Вы уверены, что хотите удалить канал <strong>{channel.name}</strong>?
                   <br /><br />
-                  Все настройки и история публика��ий будут потеряны.
+                  Все настройки и история публикаций будут потеряны.
                 </AlertDialogDescription>
               </AlertDialogHeader>
               <AlertDialogFooter>
@@ -508,7 +658,7 @@ export function ChannelDetailPage() {
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 rounded-lg px-4 py-3 text-sm bg-red-50 text-red-800 border border-red-200">
           <div className="flex items-center gap-2.5">
             <ShieldAlert className="size-4 shrink-0" />
-            <span>Бот не имеет прав на публикацию в этом канале. Добавьте <strong>@ai_poster_bot</strong> как администратора канала с правом отправки сообщений.</span>
+            <span>Бот не имеет прав на публикацию в этом канале. Добавьте <strong>{botUsername ? `@${botUsername}` : 'бота'}</strong> как администратора канала с правом отправки сообщений.</span>
           </div>
         </div>
       )}
@@ -532,12 +682,17 @@ export function ChannelDetailPage() {
             <TabsTrigger value="history" className="gap-1.5">
               <Newspaper className="size-3.5" />
               <span className="hidden sm:inline">История</span> публикаций
+              {(recentPostsResult?.total ?? postsTotal) > 0 && (
+                <span className="ml-0.5 text-xs font-medium leading-5 text-gray-500">
+                  {recentPostsResult?.total ?? postsTotal}
+                </span>
+              )}
             </TabsTrigger>
             <TabsTrigger value="sources" className="gap-1.5">
               <Database className="size-3.5" />
               Источники
               {linkedSourceIds.length > 0 && (
-                <span className="ml-1 bg-gray-200 text-gray-600 text-xs rounded-full px-1.5 py-0 leading-5">
+                <span className="ml-0.5 text-xs font-medium leading-5 text-gray-500">
                   {linkedSourceIds.length}
                 </span>
               )}
@@ -577,16 +732,16 @@ export function ChannelDetailPage() {
                 </div>
               </div>
               <CardContent className="pt-3 pb-4">
-                <div className="grid grid-cols-2 divide-x divide-y divide-gray-100 border border-gray-100 rounded-xl overflow-hidden">
+                <div className="grid grid-cols-2 divide-x divide-y divide-border rounded-xl border border-border overflow-hidden">
                   {[
                     { label: "Сегодня", value: postsToday },
                     { label: "Неделя",  value: postsWeek  },
                     { label: "Месяц",   value: postsMonth  },
                     { label: "Всего",   value: postsTotal  },
                   ].map(({ label, value }) => (
-                    <div key={label} className="flex flex-col items-center justify-center py-3 px-2 bg-white hover:bg-gray-50 transition-colors">
-                      <span className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{value}</span>
-                      <span className="text-xs text-gray-400 mt-1">{label}</span>
+                    <div key={label} className="flex flex-col items-center justify-center bg-card px-2 py-3 transition-colors hover:bg-muted/40">
+                      <span className="text-2xl font-bold text-foreground tabular-nums leading-none">{value}</span>
+                      <span className="mt-1 text-xs text-muted-foreground">{label}</span>
                     </div>
                   ))}
                 </div>
@@ -601,30 +756,42 @@ export function ChannelDetailPage() {
               <CardContent>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-y-3 gap-x-6">
                   <div className="flex items-center gap-2.5">
-                    <div className={`size-7 rounded-md flex items-center justify-center shrink-0 ${publishMode === "instant" ? "bg-yellow-50" : "bg-blue-50"}`}>
-                      {publishMode === "instant"
-                        ? <Zap className="size-3.5 text-yellow-500" />
-                        : <CalendarSchedule className="size-3.5 text-blue-500" />}
+                    <div
+                      className={`size-7 rounded-md flex items-center justify-center shrink-0 ${
+                        publishMode === "scheduled"
+                          ? "bg-blue-50"
+                          : publishMode === "every_material"
+                            ? "bg-emerald-50"
+                            : "bg-yellow-50"
+                      }`}
+                    >
+                      {publishMode === "scheduled" ? (
+                        <CalendarSchedule className="size-3.5 text-blue-500" />
+                      ) : publishMode === "every_material" ? (
+                        <Send className="size-3.5 text-emerald-600" />
+                      ) : (
+                        <Clock className="size-3.5 text-yellow-600" />
+                      )}
                     </div>
                     <div>
                       <p className="text-xs text-gray-400">Режим</p>
-                      <p className="text-sm font-medium">{publishMode === "instant" ? "Мгновенный" : "По расписанию"}</p>
+                      <p className="text-sm font-medium">{channelService.getChannelPublishModeLabel(publishMode)}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5">
-                    <div className="size-7 rounded-md bg-gray-50 flex items-center justify-center shrink-0">
-                      <Clock className="size-3.5 text-gray-400" />
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <Clock className="size-3.5 text-muted-foreground" />
                     </div>
                     <div>
                       <p className="text-xs text-gray-400">Следующая</p>
                       <p className="text-sm font-medium">
-                        {publishMode === "instant" ? "При новом материале" : nextPublication ?? "—"}
+                        {publishMode === "scheduled" ? nextPublication ?? "—" : nextPublication ?? "После появления нового материала"}
                       </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2.5">
-                    <div className="size-7 rounded-md bg-gray-50 flex items-center justify-center shrink-0">
-                      <CheckCircle className="size-3.5 text-gray-400" />
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                  <CheckCircle className="size-3.5 text-muted-foreground" />
                     </div>
                     <div>
                       <p className="text-xs text-gray-400">Последняя публ.</p>
@@ -633,14 +800,31 @@ export function ChannelDetailPage() {
                           ? new Date(channel.lastPublishedAt).toLocaleString("ru-RU", {
                               day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                             })
-                          : allPostedItems[0]
-                            ? new Date(allPostedItems[0].postedAt).toLocaleString("ru-RU", {
+                          : recentPosts[0]
+                            ? new Date(recentPosts[0].postedAt).toLocaleString("ru-RU", {
                                 day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                               })
                             : "Никогда"}
                       </p>
                     </div>
                   </div>
+                  {publishMode !== "scheduled" && (
+                    <div className="col-span-2 sm:col-span-3 flex items-start gap-2.5 border-t pt-3 mt-0.5">
+                      <div
+                        className={`size-7 rounded-md flex items-center justify-center shrink-0 ${
+                          publishMode === "every_material" ? "bg-emerald-50" : "bg-yellow-50"
+                        }`}
+                      >
+                        <Clock className={`size-3.5 ${publishMode === "every_material" ? "text-emerald-600" : "text-yellow-600"}`} />
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400">
+                          {publishMode === "every_material" ? "Минимальный интервал между постами" : "Интервал публикации"}
+                        </p>
+                        <p className="text-sm font-medium">{channelService.formatPublishInterval(publishIntervalMin * 60)}</p>
+                      </div>
+                    </div>
+                  )}
                   {publishMode === "scheduled" && scheduleHuman && (
                     <div className="col-span-2 sm:col-span-3 flex items-start gap-2.5 border-t pt-3 mt-0.5">
                       <div className="size-7 rounded-md bg-blue-50 flex items-center justify-center shrink-0">
@@ -710,13 +894,13 @@ export function ChannelDetailPage() {
                     {/* Desktop: full table */}
                     <table className="w-full text-sm hidden sm:table">
                       <thead>
-                        <tr className="border-b border-gray-100">
-                          <th className="pb-2 text-left text-xs font-normal text-gray-400 pr-4">Источник</th>
-                          <th className="pb-2 text-right text-xs font-normal text-gray-400 w-16">Сегодня</th>
-                          <th className="pb-2 text-right text-xs font-normal text-gray-400 w-16">Неделя</th>
-                          <th className="pb-2 text-right text-xs font-normal text-gray-400 w-16">Месяц</th>
-                          <th className="pb-2 text-right text-xs font-normal text-gray-400 w-16">Всего</th>
-                          <th className="pb-2 text-right text-xs font-normal text-gray-400 w-14">Публ.</th>
+                    <tr className="border-b border-border">
+                      <th className="w-16 pb-2 pr-4 text-left text-xs font-normal text-muted-foreground">Источник</th>
+                      <th className="w-16 pb-2 text-right text-xs font-normal text-muted-foreground">Сегодня</th>
+                      <th className="w-16 pb-2 text-right text-xs font-normal text-muted-foreground">Неделя</th>
+                      <th className="w-16 pb-2 text-right text-xs font-normal text-muted-foreground">Месяц</th>
+                      <th className="w-16 pb-2 text-right text-xs font-normal text-muted-foreground">Всего</th>
+                      <th className="w-14 pb-2 text-right text-xs font-normal text-muted-foreground">Публ.</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-gray-50">
@@ -759,8 +943,8 @@ export function ChannelDetailPage() {
           <Card>
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
-                <CardTitle className="text-base">Посление публикации</CardTitle>
-                {allPostedItems.length > OVERVIEW_RECENT_COUNT && (
+                <CardTitle className="text-base">Последние публикации</CardTitle>
+                {postsTotal > OVERVIEW_RECENT_COUNT && (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -774,14 +958,14 @@ export function ChannelDetailPage() {
             </CardHeader>
             <CardContent>
               {recentPosts.length === 0 ? (
-                <div className="text-center py-8 text-gray-400 text-sm">
+                <div className="py-8 text-center text-sm text-muted-foreground">
                   Публикаций пока нет
                 </div>
               ) : (
                 <div className="divide-y">
                   {recentPosts.map((pi) => (
                     <Link key={pi.id} to={`/posts/${pi.id}`}>
-                    <div className="py-2.5 hover:bg-gray-50 transition-colors -mx-1 px-1 rounded">
+                  <div className="-mx-1 rounded px-1 py-2.5 transition-colors hover:bg-muted/40">
                       {/* Desktop row */}
                       <div className="hidden sm:flex items-center gap-3">
                         <span className={`size-1.5 rounded-full shrink-0 ${pi.status === "success" ? "bg-green-400" : "bg-red-400"}`} />
@@ -852,7 +1036,7 @@ export function ChannelDetailPage() {
           <div className="flex items-start justify-between flex-wrap gap-3">
             <div>
               <h2 className="text-base font-semibold text-gray-900">История публикаций</h2>
-              <p className="text-xs text-gray-400 mt-0.5">{allPostedItems.length} публикаций всего</p>
+              <p className="text-xs text-gray-400 mt-0.5">{postsTotal} публикаций всего</p>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <Popover open={calendarOpen} onOpenChange={setCalendarOpen}>
@@ -905,12 +1089,12 @@ export function ChannelDetailPage() {
 
           {hasActiveFilters && (
             <p className="text-xs text-gray-400 -mt-2">
-              Показано {filteredPostedItems.length} из {allPostedItems.length} публикаций
+              Показано {historyTotal} из {postsTotal} публикаций
             </p>
           )}
 
           {/* Посты — каждый своя карточка */}
-          {filteredPostedItems.length === 0 ? (
+          {historyTotal === 0 ? (
             <Card>
               <CardContent className="py-12 text-center text-gray-400">
                 <Newspaper className="size-10 mx-auto mb-3 text-gray-200" />
@@ -978,7 +1162,7 @@ export function ChannelDetailPage() {
                         className="w-full max-h-64 object-cover rounded-lg"
                       />
                     )}
-                    <div className="bg-gray-50 rounded-lg px-3 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
+                  <div className="rounded-lg bg-muted/40 px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap text-foreground">
                       {pi.generatedContent}
                     </div>
                   </CardContent>
@@ -988,7 +1172,7 @@ export function ChannelDetailPage() {
           )}
 
           {/* Пагинация снаружи карточек */}
-          {filteredPostedItems.length > 0 && (
+          {historyTotal > 0 && (
             <Pagination
               currentPage={historyPage}
               totalPages={historyTotalPages}
@@ -1110,7 +1294,7 @@ export function ChannelDetailPage() {
           <AlertDialog open={!!sourceToUnlink} onOpenChange={open => !open && setSourceToUnlink(null)}>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>Отвязать истоник?</AlertDialogTitle>
+                <AlertDialogTitle>Отвязать источник?</AlertDialogTitle>
                 <AlertDialogDescription>
                   Источник <strong>{sourceBeingUnlinked?.name}</strong> будет отвязан от канала <strong>{channel.name}</strong>.
                   <br /><br />
@@ -1128,7 +1312,7 @@ export function ChannelDetailPage() {
 
           {/* Link source dialog */}
           <Dialog open={showLinkDialog} onOpenChange={setShowLinkDialog}>
-            <DialogContent className="max-w-lg">
+            <DialogContent className="max-w-2xl max-h-[85vh] overflow-hidden">
               <DialogHeader>
                 <DialogTitle>Привязать источник</DialogTitle>
                 <DialogDescription>
@@ -1145,11 +1329,11 @@ export function ChannelDetailPage() {
                     });
 
                 return availableToLink.length === 0 ? (
-                  <div className="py-6 text-center text-gray-400 text-sm">
+                  <div className="py-6 text-center text-sm text-gray-400 dark:text-gray-500">
                     Все источники команды уже привязаны к этому каналу.
                   </div>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="min-h-0 space-y-3">
                     {teamSourceTags.length > 0 && (
                       <TagFilter
                         tags={teamSourceTags}
@@ -1158,24 +1342,24 @@ export function ChannelDetailPage() {
                         label="Фильтр по тегам"
                       />
                     )}
-                    <div className="space-y-2 max-h-80 overflow-y-auto py-1">
+                    <div className="max-h-80 space-y-2 overflow-x-hidden overflow-y-auto py-1 pr-1">
                       {filteredAvailable.map(src => (
                         <div
                           key={src.id}
-                          className="flex items-center justify-between gap-3 border rounded-lg px-3 py-2.5"
+                          className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 rounded-lg border border-gray-200 px-3 py-2.5 dark:border-gray-800 sm:items-center"
                         >
-                          <div className="flex items-center gap-2 min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
                             <StatusDot status={src.status} />
-                            <div className="min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-sm font-medium text-gray-900 truncate">{src.name}</span>
-                                <Badge variant="outline" className="text-xs">{SOURCE_TYPE_LABEL[src.type]}</Badge>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex min-w-0 items-center gap-1.5">
+                                <span className="truncate text-sm font-medium text-gray-900 dark:text-gray-100">{src.name}</span>
+                                <Badge variant="outline" className="shrink-0 text-xs">{SOURCE_TYPE_LABEL[src.type]}</Badge>
                               </div>
-                              <p className="text-xs text-gray-400 truncate">{src.url}</p>
+                              <p className="truncate text-xs text-gray-400 dark:text-gray-500">{src.url}</p>
                               {(() => {
                                 const tags = sourceService.getSourceTagsById(src.id);
                                 return tags.length > 0 ? (
-                                  <div className="flex items-center gap-1 mt-0.5 flex-wrap">
+                                  <div className="mt-0.5 flex flex-wrap items-center gap-1">
                                     {tags.map(t => (
                                       <TagBadge key={t.id} name={t.name} color={t.color} />
                                     ))}
@@ -1184,12 +1368,12 @@ export function ChannelDetailPage() {
                               })()}
                             </div>
                           </div>
-                          <div className="flex items-center gap-3 shrink-0">
+                          <div className="flex shrink-0 items-center gap-3 self-start sm:self-center">
                             <div className="text-right">
-                              <p className="text-xs text-gray-500">{src.itemsCount24h} сег.</p>
-                              <p className="text-xs text-gray-400">{src.itemsCount} всего</p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">{src.itemsCount24h} сег.</p>
+                              <p className="text-xs text-gray-400 dark:text-gray-500">{src.itemsCount} всего</p>
                             </div>
-                            <Button size="sm" className="h-7 text-xs" onClick={() => handleLinkSource(src.id)}>
+                            <Button size="sm" className="h-8 shrink-0 text-xs" onClick={() => handleLinkSource(src.id)}>
                               <LinkIcon className="size-3 mr-1" />
                               Привязать
                             </Button>
@@ -1197,7 +1381,7 @@ export function ChannelDetailPage() {
                         </div>
                       ))}
                       {filteredAvailable.length === 0 && linkDialogTagFilter.length > 0 && (
-                        <div className="py-4 text-center text-gray-400 text-sm">
+                        <div className="py-4 text-center text-sm text-gray-400 dark:text-gray-500">
                           Нет источников с выбранными тегами
                         </div>
                       )}
@@ -1206,7 +1390,7 @@ export function ChannelDetailPage() {
                 );
               })()}
               {allTeamSources.length === 0 && (
-                <div className="text-center py-4 text-sm text-gray-500">
+                <div className="py-4 text-center text-sm text-gray-500 dark:text-gray-400">
                   В команде нет источников.{" "}
                   <Link to="/sources" className="text-blue-600 hover:underline" onClick={() => setShowLinkDialog(false)}>
                     Добавить источник
@@ -1222,10 +1406,54 @@ export function ChannelDetailPage() {
         ═════════════════════════════════════════════ */}
         <TabsContent value="settings" className="space-y-5">
           <Card>
+            <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+              <div>
+                <CardTitle>Telegram-метаданные</CardTitle>
+                <p className="mt-1 text-sm text-gray-500">
+                  Обновляет username, chat id, права бота и текущее число подписчиков через Telegram Bot API.
+                </p>
+              </div>
+              <Button variant="outline" onClick={handleRefreshMetadata} disabled={isRefreshingMetadata}>
+                {isRefreshingMetadata ? (
+                  <>
+                    <Loader2 className="size-4 mr-2 animate-spin" />
+                    Обновляем...
+                  </>
+                ) : (
+                  <>
+                    <Users className="size-4 mr-2" />
+                    Обновить инфо
+                  </>
+                )}
+              </Button>
+            </CardHeader>
+            <CardContent className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-lg border border-border bg-muted/40 px-4 py-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Публичный username</div>
+                    <div className="mt-1 text-sm font-medium text-foreground">{channel.telegramUsername ? `@${channel.telegramUsername}` : "Не задан"}</div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-4 py-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Chat ID</div>
+                    <div className="mt-1 font-mono text-sm text-foreground">{channelTechnicalId}</div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-4 py-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Подписчики</div>
+                    <div className="mt-1 text-sm font-medium text-foreground">{channel.subscribersCount.toLocaleString("ru-RU")}</div>
+                  </div>
+                  <div className="rounded-lg border border-border bg-muted/40 px-4 py-3">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">Права бота</div>
+                <div className={`mt-1 text-sm font-medium ${channel.botCanPost ? "text-emerald-700" : "text-red-600"}`}>
+                  {channel.botCanPost ? "Бот может публиковать" : "Бот не может публиковать"}
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
             <CardHeader>
               <CardTitle>Стиль постов</CardTitle>
             </CardHeader>
-            <CardContent>
+            <CardContent className={skipLlmRewrite ? "opacity-60" : ""}>
               <div className="space-y-2">
                 <Label htmlFor="postStyle" className="mb-2 block">Опишите желаемый стиль</Label>
                 <Textarea
@@ -1233,11 +1461,18 @@ export function ChannelDetailPage() {
                   placeholder="Например: пиши кратко и неформально, используй эмодзи, обращайся на «ты», добавляй хэштеги..."
                   className="min-h-[100px]"
                   value={postStyle}
+                  disabled={skipLlmRewrite}
                   onChange={(e) => setPostStyle(e.target.value)}
                 />
-                <p className="text-xs text-gray-400">
-                  Система уже знает, что нужно переписывать материал, сохраняя смысл и факты. Здесь укажите только стилистику: тон, формат, аудиторию, язык, хэштеги, эмодзи и т.д.
-                </p>
+                {skipLlmRewrite ? (
+                  <p className="text-xs text-amber-600">
+                    Этот блок не используется, пока включён режим публикации исходного текста без AI.
+                  </p>
+                ) : (
+                  <p className="text-xs text-gray-400">
+                    Система уже знает, что нужно переписывать материал, сохраняя смысл и факты. Здесь укажите только стилистику: тон, формат, аудиторию, язык, хэштеги, эмодзи и т.д.
+                  </p>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -1245,17 +1480,47 @@ export function ChannelDetailPage() {
           <Card>
             <CardHeader><CardTitle>Политика публикации</CardTitle></CardHeader>
             <CardContent className="space-y-5">
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-xl border border-border bg-muted/30 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium text-foreground">Публиковать без фото</div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Канал всегда отправляет только текст, даже если у материала есть изображение или Telegram media.
+                      </p>
+                    </div>
+                    <Switch checked={disableMedia} onCheckedChange={setDisableMedia} />
+                  </div>
+                </div>
+                <div className="rounded-xl border border-border bg-muted/30 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium text-foreground">Публиковать исходный текст без AI</div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        Материал публикуется без переписывания LLM. Если текст слишком длинный, он аккуратно обрезается по границе текста под лимит Telegram.
+                      </p>
+                    </div>
+                    <Switch checked={skipLlmRewrite} onCheckedChange={setSkipLlmRewrite} />
+                  </div>
+                </div>
+              </div>
               <div className="space-y-2">
                 <Label>Режим публикации</Label>
                 <div className="flex flex-col sm:flex-row gap-3">
                   {[
-                    { value: "instant", label: "⚡ Мгновенный", desc: "Публикация на каждый новый материал из привязанных источников" },
-                    { value: "scheduled", label: "🗓️ По расписанию", desc: "Публикует в заданное время" },
+                    { value: "periodic", label: "⏱️ Периодически", desc: "Публикует по интервалу: например, раз в 30 минут" },
+                    { value: "scheduled", label: "📅 По расписанию", desc: "Публикует в заданные дни и время" },
+                    { value: "every_material", label: "📰 Каждый материал", desc: "Публикует все новые материалы по очереди с минимальным интервалом" },
                   ].map(opt => (
                     <button
                       key={opt.value}
                       type="button"
-                      onClick={() => setPublishMode(opt.value)}
+                      onClick={() => {
+                        setPublishMode(opt.value as "periodic" | "scheduled" | "every_material");
+                        if (opt.value === "every_material") {
+                          setContentStrategy("newest");
+                        }
+                      }}
                       className={`flex-1 py-3 px-4 rounded-lg border-2 text-sm font-medium transition-colors text-left ${
                         publishMode === opt.value
                           ? "border-blue-500 bg-blue-50 text-blue-700"
@@ -1268,16 +1533,38 @@ export function ChannelDetailPage() {
                   ))}
                 </div>
               </div>
+              {publishMode !== "scheduled" && (
+                <div className="border-t pt-5 space-y-2">
+                  <Label htmlFor="publishIntervalMin">
+                    {publishMode === "every_material" ? "Минимальный интервал между постами" : "Публиковать не чаще чем раз в"}
+                  </Label>
+                  <div className="flex items-center gap-3 max-w-sm">
+                    <NumericInput
+                      id="publishIntervalMin"
+                      min={5}
+                      max={24 * 60}
+                      step={5}
+                      value={publishIntervalMin}
+                      fallbackValue={30}
+                      onValueChange={setPublishIntervalMin}
+                    />
+                    <span className="text-sm text-gray-500 whitespace-nowrap">минут</span>
+                  </div>
+                  <p className="text-xs text-gray-400">
+                    Допустимый диапазон: от 5 минут до 24 часов. Сейчас: {channelService.formatPublishInterval(publishIntervalMin * 60)}.
+                  </p>
+                </div>
+              )}
               {publishMode === "scheduled" && (
                 <div className="border-t pt-5">
                   <SchedulePicker value={scheduleValue} onChange={setScheduleValue} />
                 </div>
               )}
-              {publishMode === "instant" ? (
+              {publishMode === "every_material" ? (
                 <div className="border-t pt-4">
-                  <div className="flex items-start gap-2 text-sm text-gray-500 bg-gray-50 rounded-lg px-3 py-2.5">
+                <div className="flex items-start gap-2 rounded-lg bg-muted/40 px-3 py-2.5 text-sm text-muted-foreground">
                     <span className="mt-0.5">ℹ️</span>
-                    <span>Пост публикуется на каждый новый материал из привязанных источников. Минимальный перерыв между публикациями — 5 минут.</span>
+                    <span>С момента включения режима канал будет публиковать все новые материалы из привязанных источников по одному, соблюдая указанный минимальный интервал.</span>
                   </div>
                 </div>
               ) : (
@@ -1377,8 +1664,11 @@ export function ChannelDetailPage() {
             testProgress={testProgress}
             testGeneratedContent={testGeneratedContent}
             testLLMStats={testLLMStats}
+            testPreviewTraceId={testPreviewTraceId}
+            isPublishingTestPost={isPublishingTestPost}
             handleOpenTestDialog={handleOpenTestDialog}
             handleRunTestGeneration={handleRunTestGeneration}
+            handlePublishSelectedTestItem={handlePublishSelectedTestItem}
           />
         </TabsContent>
       </Tabs>
@@ -1416,43 +1706,73 @@ function StatChip({ label, value, highlight }: { label: string; value: number; h
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function parseCronTimes(cron: string): string[] {
-  try {
-    const parts = cron.split(" ");
-    const minutes = parts[0] || "0";
-    const hours = parts[1] || "9";
-    return hours.split(",").map(h => `${h.padStart(2, "0")}:${minutes.padStart(2, "0")}`);
-  } catch {
-    return ["09:00"];
+function resolveChannelSchedule(channel?: { scheduleJson?: { timezone: string; slots: Array<{ days: string[]; times: string[] }> } }) {
+  if (channel?.scheduleJson?.slots?.length) {
+    return structuredClone(channel.scheduleJson)
   }
+
+  return createDefaultSchedule("UTC")
+}
+
+function resolveChannelPublishIntervalMinutes(channel?: { publishIntervalSec?: number | null }) {
+  const seconds = channel?.publishIntervalSec && channel.publishIntervalSec > 0 ? channel.publishIntervalSec : 30 * 60
+  return Math.min(24 * 60, Math.max(5, Math.round(seconds / 60)))
 }
 
 function getNextPublication(scheduleValue: {
-  days: string[];
-  times: string[];
   timezone: string;
+  slots: Array<{ days: string[]; times: string[] }>;
 }): string {
   const dayMap: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
   const dayLabels = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-  const now = new Date();
-  const currentDay = now.getDay();
-  const currentTimeStr = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-  const sortedTimes = [...scheduleValue.times].sort();
-  const scheduledDays = scheduleValue.days
-    .map(d => dayMap[d]).filter(n => n !== undefined).sort((a, b) => a - b);
-  if (scheduledDays.length === 0 || sortedTimes.length === 0) return "—";
-  if (scheduledDays.includes(currentDay)) {
-    const nextTime = sortedTimes.find(t => t > currentTimeStr);
-    if (nextTime) return `сегодня в ${nextTime} (${scheduleValue.timezone})`;
-  }
-  for (let i = 1; i <= 7; i++) {
-    const checkDay = (currentDay + i) % 7;
-    if (scheduledDays.includes(checkDay)) {
-      const label = i === 1 ? "завтра" : dayLabels[checkDay];
-      return `${label} в ${sortedTimes[0]} (${scheduleValue.timezone})`;
+  const zonedNow = getZonedDateParts(scheduleValue.timezone);
+  const currentDay = dayMap[zonedNow.weekdayShort.slice(0, 3) as keyof typeof dayMap] ?? 0;
+  const currentTimeStr = `${String(zonedNow.hour).padStart(2, "0")}:${String(zonedNow.minute).padStart(2, "0")}`;
+
+  const normalizedSlots = scheduleValue.slots
+    .map((slot) => ({
+      days: slot.days.map((day) => dayMap[day]).filter((day): day is number => day !== undefined).sort((a, b) => a - b),
+      times: [...slot.times].sort(),
+    }))
+    .filter((slot) => slot.days.length > 0 && slot.times.length > 0);
+
+  if (normalizedSlots.length === 0) return "—";
+
+  for (const slot of normalizedSlots) {
+    if (slot.days.includes(currentDay)) {
+      const nextTime = slot.times.find((time) => time > currentTimeStr);
+      if (nextTime) return `сегодня в ${nextTime} (${getTimezoneLabel(scheduleValue.timezone)})`;
     }
   }
+
+  for (let offset = 1; offset <= 7; offset += 1) {
+    const checkDay = (currentDay + offset) % 7;
+    const matchingSlot = normalizedSlots.find((slot) => slot.days.includes(checkDay));
+    if (matchingSlot) {
+      const label = offset === 1 ? "завтра" : dayLabels[checkDay];
+      return `${label} в ${matchingSlot.times[0]} (${getTimezoneLabel(scheduleValue.timezone)})`;
+    }
+  }
+
   return "—";
+}
+
+function getNextIntervalPublication(lastPublishedAt?: string, intervalSec?: number | null) {
+  if (!intervalSec || intervalSec <= 0) {
+    return null
+  }
+
+  if (!lastPublishedAt) {
+    return null
+  }
+
+  const nextAt = new Date(new Date(lastPublishedAt).getTime() + intervalSec * 1000)
+  return nextAt.toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  })
 }
 
 // ── Test Generation Tab Component ────────────────────────────────────────────
@@ -1460,8 +1780,8 @@ function getNextPublication(scheduleValue: {
 function TestGenerationTab({
   channel, testItems, showTestDialog, setShowTestDialog,
   testStep, selectedTestItem, setSelectedTestItem,
-  testProgress, testGeneratedContent, testLLMStats,
-  handleOpenTestDialog, handleRunTestGeneration,
+  testProgress, testGeneratedContent, testLLMStats, testPreviewTraceId,
+  isPublishingTestPost, handleOpenTestDialog, handleRunTestGeneration, handlePublishSelectedTestItem,
 }: {
   channel: { name: string };
   testItems: Item[];
@@ -1472,9 +1792,12 @@ function TestGenerationTab({
   setSelectedTestItem: (v: Item | null) => void;
   testProgress: number;
   testGeneratedContent: string;
-  testLLMStats: { model: string; tokens: number; cost: number; latencyMs: number };
+  testLLMStats: { model: string; tokens: number; cost: number; latencyMs: number; usedLlm: boolean };
+  testPreviewTraceId: string | null;
+  isPublishingTestPost: boolean;
   handleOpenTestDialog: () => void;
-  handleRunTestGeneration: () => void;
+  handleRunTestGeneration: () => void | Promise<void>;
+  handlePublishSelectedTestItem: () => void | Promise<void>;
 }) {
   const [postExpanded, setPostExpanded] = useState(false);
 
@@ -1583,13 +1906,13 @@ function TestGenerationTab({
               <div className="py-8 space-y-6">
                 <div className="space-y-2">
                   <div className="flex items-center justify-between text-sm">
-                    <span className="text-gray-600">Обработка через gpt-4o</span>
-                    <span className="text-gray-400 tabular-nums">{testProgress}%</span>
+                    <span className="text-gray-600 dark:text-gray-300">Обработка материала</span>
+                    <span className="tabular-nums text-gray-400 dark:text-gray-500">{testProgress}%</span>
                   </div>
                   <Progress value={testProgress} className="h-2" />
                 </div>
 
-                <div className="space-y-2 text-xs text-gray-500 font-mono bg-gray-50 rounded-lg p-3">
+                <div className="space-y-2 rounded-lg bg-gray-50 p-3 font-mono text-xs text-gray-500 dark:bg-gray-900/70 dark:text-gray-400">
                   {testProgress >= 10 && <div className="flex items-center gap-2"><Loader2 className="size-3 animate-spin text-blue-500" /> Загрузка материала...</div>}
                   {testProgress >= 30 && <div className="flex items-center gap-2"><CheckCircle className="size-3 text-green-500" /> Материал загружен ({selectedTestItem?.content.length.toLocaleString("ru-RU")} сим.)</div>}
                   {testProgress >= 50 && <div className="flex items-center gap-2"><Loader2 className="size-3 animate-spin text-blue-500" /> Применение промптов канала...</div>}
@@ -1597,9 +1920,9 @@ function TestGenerationTab({
                   {testProgress >= 90 && <div className="flex items-center gap-2"><Loader2 className="size-3 animate-spin text-blue-500" /> Финализация...</div>}
                 </div>
 
-                <div className="bg-blue-50 rounded-lg p-3">
-                  <div className="text-xs text-blue-700 font-medium mb-1">Входной материал</div>
-                  <div className="text-xs text-blue-600 truncate">{selectedTestItem?.title}</div>
+                <div className="rounded-lg bg-blue-50 p-3 dark:bg-blue-500/10">
+                  <div className="mb-1 text-xs font-medium text-blue-700 dark:text-blue-300">Входной материал</div>
+                  <div className="truncate text-xs text-blue-600 dark:text-blue-200">{selectedTestItem?.title}</div>
                 </div>
               </div>
             </>
@@ -1617,36 +1940,42 @@ function TestGenerationTab({
                 </DialogDescription>
               </DialogHeader>
 
+              {!testLLMStats.usedLlm && (
+                <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                  Текст подготовлен без AI. Канал возьмёт исходный материал и при необходимости обрежет его по границе текста.
+                </div>
+              )}
+
               {/* LLM Stats */}
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                  <div className="text-xs text-gray-500 mb-0.5">Модель</div>
-                  <div className="text-sm font-semibold text-gray-900">{testLLMStats.model}</div>
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-center dark:bg-gray-900/70">
+                  <div className="mb-0.5 text-xs text-gray-500 dark:text-gray-400">Модель</div>
+                  <div className="text-sm font-semibold text-gray-900 dark:text-gray-100">{testLLMStats.model}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                  <div className="text-xs text-gray-500 mb-0.5">Токены</div>
-                  <div className="text-sm font-semibold text-gray-900 tabular-nums">{testLLMStats.tokens.toLocaleString("ru-RU")}</div>
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-center dark:bg-gray-900/70">
+                  <div className="mb-0.5 text-xs text-gray-500 dark:text-gray-400">Токены</div>
+                  <div className="text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">{testLLMStats.tokens.toLocaleString("ru-RU")}</div>
                 </div>
-                <div className="bg-gray-50 rounded-lg px-3 py-2 text-center">
-                  <div className="text-xs text-gray-500 mb-0.5">Стоимость</div>
-                  <div className="text-sm font-semibold text-gray-900 tabular-nums">${testLLMStats.cost}</div>
+                <div className="rounded-lg bg-gray-50 px-3 py-2 text-center dark:bg-gray-900/70">
+                  <div className="mb-0.5 text-xs text-gray-500 dark:text-gray-400">Стоимость</div>
+                  <div className="text-sm font-semibold tabular-nums text-gray-900 dark:text-gray-100">{testLLMStats.cost > 0 ? `$${testLLMStats.cost}` : "—"}</div>
                 </div>
               </div>
 
               {/* Source material */}
-              <div className="border rounded-lg overflow-hidden">
-                <div className="px-3 py-2 bg-gray-50 border-b">
+              <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
+                <div className="border-b border-gray-200 bg-gray-50 px-3 py-2 dark:border-gray-800 dark:bg-gray-900/70">
                   <div className="flex items-center gap-2">
-                    <FileText className="size-3.5 text-gray-400" />
-                    <span className="text-xs font-medium text-gray-600">Исходный материал</span>
+                    <FileText className="size-3.5 text-gray-400 dark:text-gray-500" />
+                    <span className="text-xs font-medium text-gray-600 dark:text-gray-300">Исходный материал</span>
                   </div>
                 </div>
                 <div className="px-3 py-2">
-                  <div className="text-sm font-medium text-gray-900 mb-1">{selectedTestItem?.title}</div>
-                  <div className="text-xs text-gray-500 line-clamp-3">{selectedTestItem?.content.substring(0, 200)}...</div>
-                  <div className="flex items-center gap-2 mt-1.5">
+                  <div className="mb-1 text-sm font-medium text-gray-900 dark:text-gray-100">{selectedTestItem?.title}</div>
+                  <div className="line-clamp-3 text-xs text-gray-500 dark:text-gray-400">{selectedTestItem?.content.substring(0, 200)}...</div>
+                  <div className="mt-1.5 flex items-center gap-2">
                     <Badge variant="outline" className="text-xs">{selectedTestItem?.sourceName}</Badge>
-                    <span className="text-xs text-gray-400">
+                    <span className="text-xs text-gray-400 dark:text-gray-500">
                       {selectedTestItem && new Date(selectedTestItem.extractedAt).toLocaleDateString("ru-RU")}
                     </span>
                   </div>
@@ -1654,20 +1983,20 @@ function TestGenerationTab({
               </div>
 
               {/* Generated post — expandable */}
-              <div className="border rounded-lg overflow-hidden">
+              <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
                 <button
                   type="button"
                   onClick={() => setPostExpanded(!postExpanded)}
-                  className="w-full px-3 py-2 bg-green-50 border-b border-green-100 flex items-center justify-between hover:bg-green-100 transition-colors"
+                  className="flex w-full items-center justify-between border-b border-green-100 bg-green-50 px-3 py-2 transition-colors hover:bg-green-100 dark:border-green-500/20 dark:bg-green-500/10 dark:hover:bg-green-500/15"
                 >
                   <div className="flex items-center gap-2">
-                    <Sparkles className="size-3.5 text-green-600" />
-                    <span className="text-xs font-medium text-green-700">Сгенерированный пост</span>
+                    <Sparkles className="size-3.5 text-green-600 dark:text-green-400" />
+                    <span className="text-xs font-medium text-green-700 dark:text-green-300">Сгенерированный пост</span>
                   </div>
                   {postExpanded ? (
-                    <ChevronUp className="size-3.5 text-green-600" />
+                    <ChevronUp className="size-3.5 text-green-600 dark:text-green-400" />
                   ) : (
-                    <ChevronDown className="size-3.5 text-green-600" />
+                    <ChevronDown className="size-3.5 text-green-600 dark:text-green-400" />
                   )}
                 </button>
                 <div className="p-3 space-y-2">
@@ -1678,7 +2007,7 @@ function TestGenerationTab({
                       className="w-full max-h-48 object-cover rounded-lg"
                     />
                   )}
-                  <pre className={`text-sm text-gray-800 whitespace-pre-wrap font-sans ${
+                  <pre className={`font-sans whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200 ${
                     !postExpanded ? "line-clamp-4" : ""
                   }`}>
                     {testGeneratedContent}
@@ -1687,7 +2016,7 @@ function TestGenerationTab({
                     <button
                       type="button"
                       onClick={() => setPostExpanded(true)}
-                      className="text-xs text-blue-600 hover:text-blue-700 mt-1"
+                      className="mt-1 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
                     >
                       Показать полностью
                     </button>
@@ -1695,10 +2024,18 @@ function TestGenerationTab({
                 </div>
               </div>
 
-              <div className="flex justify-between gap-2 pt-2 border-t">
+              <div className="flex justify-between gap-2 border-t border-gray-200 pt-2 dark:border-gray-800">
                 <Button variant="outline" onClick={() => { setPostExpanded(false); handleOpenTestDialog(); }}>
                   <TestTube className="size-4 mr-2" />
                   Новый тест
+                </Button>
+                <Button onClick={handlePublishSelectedTestItem} disabled={isPublishingTestPost}>
+                  {isPublishingTestPost ? (
+                    <Loader2 className="size-4 mr-2 animate-spin" />
+                  ) : (
+                    <Send className="size-4 mr-2" />
+                  )}
+                  Опубликовать
                 </Button>
                 <Button variant="outline" onClick={() => { setPostExpanded(false); setShowTestDialog(false); }}>
                   Закрыть

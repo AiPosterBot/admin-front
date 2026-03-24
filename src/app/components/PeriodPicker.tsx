@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CalendarIcon } from "lucide-react";
 import type { DateRange } from "react-day-picker";
 import { Button } from "./ui/button";
@@ -19,6 +19,16 @@ export function PeriodPicker({
   placeholder = "Период",
 }: PeriodPickerProps) {
   const [open, setOpen] = useState(false);
+  const [numberOfMonths, setNumberOfMonths] = useState(2);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia("(min-width: 640px)");
+    const updateMonths = () => setNumberOfMonths(mediaQuery.matches ? 2 : 1);
+
+    updateMonths();
+    mediaQuery.addEventListener("change", updateMonths);
+    return () => mediaQuery.removeEventListener("change", updateMonths);
+  }, []);
 
   const label = value?.from
     ? value.to
@@ -38,7 +48,7 @@ export function PeriodPicker({
           {label}
         </Button>
       </PopoverTrigger>
-      <PopoverContent className="w-auto p-0" align={align}>
+      <PopoverContent className="max-w-[calc(100vw-1rem)] w-auto p-0" align={align}>
         <Calendar
           mode="range"
           selected={value}
@@ -46,7 +56,7 @@ export function PeriodPicker({
             onChange(range);
             if (range?.from && range?.to) setOpen(false);
           }}
-          numberOfMonths={2}
+          numberOfMonths={numberOfMonths}
           disabled={{ after: new Date() }}
           initialFocus
         />

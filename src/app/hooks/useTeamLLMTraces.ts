@@ -1,28 +1,41 @@
-// ══════════════════════════════════════════════════════════════════════
-//  useTeamLLMTraces — реактивный список LLM-трейсов текущей команды.
-// ══════════════════════════════════════════════════════════════════════
+import { useCallback, useEffect } from 'react'
 
-import { useTeam } from '../context/TeamContext';
-import { useAsync } from '../lib/asyncState';
-import { getTeamTraces } from '../services/llmTraceService';
-import type { LLMTrace } from '../data/mock-data';
-import type { AsyncState } from '../lib/asyncState';
+import { useTeam } from '../context/TeamContext'
+import { useAsync } from '../lib/asyncState'
+import { getTeamTraces, type GetTeamTracesOptions, type TeamLlmTracesResult } from '../services/llmTraceService'
+import type { AsyncState } from '../lib/asyncState'
 
-export interface UseTeamLLMTracesReturn {
-  state: AsyncState<LLMTrace[]>;
-  invalidate: () => void;
+export interface UseTeamLlmTracesReturn {
+  state: AsyncState<TeamLlmTracesResult>
+  invalidate: () => void
 }
 
-export function useTeamLLMTraces(): UseTeamLLMTracesReturn {
-  const { currentTeamId } = useTeam();
+export function useTeamLLMTraces(options: GetTeamTracesOptions = {}): UseTeamLlmTracesReturn {
+  const { currentTeamId } = useTeam()
 
-  const { state, invalidate } = useAsync<LLMTrace[]>(
-    () =>
-      currentTeamId
-        ? getTeamTraces(currentTeamId)
-        : Promise.resolve(null),
-    [currentTeamId],
-  );
+  const fetchTraces = useCallback(() => {
+    if (!currentTeamId) {
+      return Promise.resolve(null)
+    }
 
-  return { state, invalidate };
+    return getTeamTraces(currentTeamId, options)
+  }, [currentTeamId, options.page, options.limit, options.operation, options.from, options.to])
+
+  const { state, invalidate } = useAsync<TeamLlmTracesResult>(fetchTraces, [fetchTraces], { keepPreviousData: true })
+
+  useEffect(() => {
+    if (!currentTeamId) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      invalidate()
+    }, 10000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [currentTeamId, invalidate])
+
+  return { state, invalidate }
 }

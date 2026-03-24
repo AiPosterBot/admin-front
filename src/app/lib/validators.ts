@@ -79,7 +79,7 @@ export const channelSchema = z.object({
     .string()
     .min(2, 'Название канала слишком короткое')
     .max(80, 'Название канала слишком длинное'),
-  telegramId: z
+  telegramTarget: z
     .string()
     .min(1, 'Укажите Telegram ID или username')
     .regex(/^-?\d+$|^@[a-zA-Z][a-zA-Z0-9_]{2,}$/, {
@@ -121,7 +121,7 @@ export type AdminForm = z.infer<typeof adminSchema>;
 /** Тип ошибок от safeParse — совместим с Zod v3 и v4 */
 export type ValidationErrors = z.ZodError;
 
-// ── Утилита: безопасный parse без throw ───────────���──────────────────
+// ?? ???????: ?????????? `parse` ??? throw ?????????????????????????
 
 export function safeParse<T>(
   schema: z.ZodSchema<T>,

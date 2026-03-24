@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import type { TagColor } from "../data/mock-data";
+import type { TagColor } from "../types/domain";
 
 const TAG_COLOR_MAP: Record<TagColor, { bg: string; text: string; border: string }> = {
   red:    { bg: "bg-red-50 dark:bg-red-950",       text: "text-red-700 dark:text-red-300",       border: "border-red-200 dark:border-red-800" },

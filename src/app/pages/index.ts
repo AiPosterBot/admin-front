@@ -22,6 +22,7 @@ export { AdminUsersPage } from "./AdminUsersPage";
 export { AdminTeamsPage } from "./AdminTeamsPage";
 export { AdminAdminsPage } from "./AdminAdminsPage";
 export { AdminInvitesPage } from "./AdminInvitesPage";
+export { AdminLLMTracesPage } from "./AdminLLMTracesPage";
 export { AdsCampaignsPage } from "./AdsCampaignsPage";
 export { AdsCampaignDetailPage } from "./AdsCampaignDetailPage";
 export { PostDetailPage } from "./PostDetailPage";

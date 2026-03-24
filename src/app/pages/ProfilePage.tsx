@@ -1,238 +1,271 @@
-import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Label } from "../components/ui/label";
-import { Input } from "../components/ui/input";
-import { Button } from "../components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "../components/ui/dialog";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "../components/ui/alert-dialog";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "../components/ui/select";
-import { UserAvatar } from "../components/UserAvatar";
-import { getCurrentUser } from "../data/mock-data";
-import {
-  Calendar,
-  Lock,
-  Save,
-  Globe,
-  Send,
-  ExternalLink,
-  CheckCircle,
-  Unlink,
-  Loader2,
-  Copy,
-  Check,
-} from "lucide-react";
-import { toast } from "sonner";
+import { useEffect, useMemo, useState } from 'react'
+import { Copy, ExternalLink, Globe, Link as LinkIcon, Lock, QrCode, Save, Unplug } from 'lucide-react'
+import { toast } from 'sonner'
 
-const BOT_USERNAME = "ai_poster_bot";
-const LINK_START_PARAM = "link_account";
+import { UserAvatar } from '../components/UserAvatar'
+import { Button } from '../components/ui/button'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
+import { Input } from '../components/ui/input'
+import { Label } from '../components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { useAuth } from '../context/AuthContext'
+import { getTimezoneOptions } from '../lib/timezones'
+import { readSession, writeSession } from '../lib/session'
+import { checkTelegramLink, getProfile, startTelegramLink, unlinkTelegram, updateProfile, type ProfileRecord, type TelegramLinkStartResult } from '../services/profileService'
 
-const TIMEZONES = [
-  { value: "Pacific/Midway", label: "(GMT-11:00) Мидуэй" },
-  { value: "Pacific/Honolulu", label: "(GMT-10:00) Гавайи" },
-  { value: "America/Anchorage", label: "(GMT-09:00) Аляска" },
-  { value: "America/Los_Angeles", label: "(GMT-08:00) Лос-Анджелес" },
-  { value: "America/Denver", label: "(GMT-07:00) Денвер" },
-  { value: "America/Chicago", label: "(GMT-06:00) Чикаго" },
-  { value: "America/New_York", label: "(GMT-05:00) Нью-Йорк" },
-  { value: "America/Caracas", label: "(GMT-04:00) Каракас" },
-  { value: "America/Sao_Paulo", label: "(GMT-03:00) Сан-Паулу" },
-  { value: "Atlantic/South_Georgia", label: "(GMT-02:00) Южная Георгия" },
-  { value: "Atlantic/Azores", label: "(GMT-01:00) Азорские острова" },
-  { value: "Europe/London", label: "(GMT+00:00) Лондон" },
-  { value: "Europe/Berlin", label: "(GMT+01:00) Берлин" },
-  { value: "Europe/Kiev", label: "(GMT+02:00) Киев" },
-  { value: "Europe/Moscow", label: "(GMT+03:00) Москва" },
-  { value: "Europe/Samara", label: "(GMT+04:00) Самара" },
-  { value: "Asia/Yekaterinburg", label: "(GMT+05:00) Екатеринбург" },
-  { value: "Asia/Almaty", label: "(GMT+06:00) Алматы" },
-  { value: "Asia/Krasnoyarsk", label: "(GMT+07:00) Красноярск" },
-  { value: "Asia/Irkutsk", label: "(GMT+08:00) Иркутск" },
-  { value: "Asia/Yakutsk", label: "(GMT+09:00) Якутск" },
-  { value: "Asia/Vladivostok", label: "(GMT+10:00) Владивосток" },
-  { value: "Asia/Magadan", label: "(GMT+11:00) Магадан" },
-  { value: "Pacific/Auckland", label: "(GMT+12:00) Окленд" },
-];
+const TIMEZONE_OPTIONS = getTimezoneOptions()
 
-function getDefaultTimezone(): string {
-  try {
-    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (TIMEZONES.some((t) => t.value === tz)) return tz;
-  } catch {}
-  return "Europe/Moscow";
-}
+function extractBotUsername(link: string | null) {
+  if (!link) {
+    return null
+  }
 
-function getSavedTimezone(): string {
-  return localStorage.getItem("user_timezone") || getDefaultTimezone();
-}
-
-/** QR code via goqr.me free API */
-function qrUrl(data: string, size = 200) {
-  return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(data)}`;
+  const match = link.match(/t\.me\/([^/?]+)/i)
+  return match?.[1] ?? null
 }
 
 export function ProfilePage() {
-  const currentUser = getCurrentUser();
-  const [displayName, setDisplayName] = useState(
-    currentUser?.displayName || ""
-  );
-  const [timezone, setTimezone] = useState(getSavedTimezone());
+  const { currentUser, changePassword, refresh } = useAuth()
+  const [profile, setProfile] = useState<ProfileRecord | null>(null)
+  const [displayName, setDisplayName] = useState(currentUser?.displayName ?? '')
+  const [timezone, setTimezone] = useState('Europe/Moscow')
+  const [isSavingProfile, setIsSavingProfile] = useState(false)
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true)
   const [passwordForm, setPasswordForm] = useState({
-    currentPassword: "",
-    newPassword: "",
-    confirmPassword: "",
-  });
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  })
+  const [isSavingPassword, setIsSavingPassword] = useState(false)
+  const [linkData, setLinkData] = useState<TelegramLinkStartResult | null>(null)
+  const [isStartingLink, setIsStartingLink] = useState(false)
+  const [isCheckingLink, setIsCheckingLink] = useState(false)
+  const [isUnlinking, setIsUnlinking] = useState(false)
+  const [linkPending, setLinkPending] = useState(false)
 
-  // Telegram linking flow
-  const [tgLinked, setTgLinked] = useState(!!currentUser?.telegramUsername);
-  const [tgDialogOpen, setTgDialogOpen] = useState(false);
-  const [tgLinking, setTgLinking] = useState(false);
-  const [linkCopied, setLinkCopied] = useState(false);
+  useEffect(() => {
+    let isMounted = true
 
-  if (!currentUser) return null;
+    async function loadProfile() {
+      try {
+        const nextProfile = await getProfile()
+        if (!isMounted) {
+          return
+        }
 
-  const deepLink = `https://t.me/${BOT_USERNAME}?start=${LINK_START_PARAM}_${currentUser.id}`;
-
-  const handleSaveName = (e: React.FormEvent) => {
-    e.preventDefault();
-    toast.success("Имя успешно обновлено");
-  };
-
-  const handleSaveTimezone = () => {
-    localStorage.setItem("user_timezone", timezone);
-    toast.success("Часовой пояс сохранён", {
-      description: TIMEZONES.find((t) => t.value === timezone)?.label,
-    });
-  };
-
-  const handleChangePassword = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
-      toast.error("Пароли не совпадают", {
-        description: "Новый пароль и подтверждение должны совпадать",
-      });
-      return;
+        setProfile(nextProfile)
+        setDisplayName(nextProfile.displayName)
+        setTimezone(nextProfile.timezone)
+      } catch (error) {
+        if (isMounted) {
+          toast.error(error instanceof Error ? error.message : 'Не удалось загрузить профиль')
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoadingProfile(false)
+        }
+      }
     }
-    toast.success("Пароль успешно изменён");
-    setPasswordForm({
-      currentPassword: "",
-      newPassword: "",
-      confirmPassword: "",
-    });
-  };
 
-  const handleStartLinking = () => {
-    setTgDialogOpen(true);
-    setTgLinking(false);
-    setLinkCopied(false);
-  };
+    void loadProfile()
 
-  const handleCopyLink = () => {
+    return () => {
+      isMounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!linkPending) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      void handleCheckTelegramLink(true)
+    }, 4000)
+
+    return () => {
+      window.clearInterval(timer)
+    }
+  }, [linkPending])
+
+  const selectedTimezoneLabel = useMemo(
+    () => TIMEZONE_OPTIONS.find((option) => option.value === timezone)?.label ?? timezone,
+    [timezone],
+  )
+
+  const botUsername = useMemo(() => extractBotUsername(linkData?.deepLink ?? null), [linkData?.deepLink])
+
+  if (!currentUser) {
+    return null
+  }
+
+  const applyProfile = (nextProfile: ProfileRecord) => {
+    setProfile(nextProfile)
+    setDisplayName(nextProfile.displayName)
+    setTimezone(nextProfile.timezone)
+  }
+
+  async function handleCheckTelegramLink(isSilent = false) {
     try {
-      const textArea = document.createElement("textarea");
-      textArea.value = deepLink;
-      textArea.style.position = "fixed";
-      textArea.style.left = "-9999px";
-      document.body.appendChild(textArea);
-      textArea.select();
-      document.execCommand("copy");
-      document.body.removeChild(textArea);
-      setLinkCopied(true);
-      setTimeout(() => setLinkCopied(false), 2000);
-    } catch {
-      toast.error("Не удалось скопировать ссылку");
+      setIsCheckingLink(true)
+      const status = await checkTelegramLink()
+      applyProfile(status.profile)
+      setLinkPending(status.pending)
+
+      if (status.linked) {
+        setLinkData(null)
+        setLinkPending(false)
+        if (!isSilent) {
+          toast.success('Telegram-аккаунт успешно привязан')
+        }
+      } else if (!status.pending && !isSilent) {
+        toast.info('Привязка ещё не завершена')
+      }
+    } catch (error) {
+      if (!isSilent) {
+        toast.error(error instanceof Error ? error.message : 'Не удалось проверить статус привязки')
+      }
+    } finally {
+      setIsCheckingLink(false)
     }
-  };
+  }
 
-  /** Mock: simulate waiting for bot confirmation */
-  const handleCheckLink = () => {
-    setTgLinking(true);
-    setTimeout(() => {
-      setTgLinking(false);
-      setTgLinked(true);
-      setTgDialogOpen(false);
-      toast.success("Telegram привязан!", {
-        description: `Аккаунт @${currentUser.telegramUsername || "user_tg"} успешно привязан`,
-      });
-    }, 2000);
-  };
+  const handleSaveProfile = async (event: React.FormEvent) => {
+    event.preventDefault()
+    setIsSavingProfile(true)
 
-  const handleUnlink = () => {
-    setTgLinked(false);
-    toast.success("Telegram отвязан", {
-      description:
-        "Привязка удалена. Для создания рекламных постов нужно привязать аккаунт заново.",
-    });
-  };
+    try {
+      const nextProfile = await updateProfile({ displayName, timezone })
+      applyProfile(nextProfile)
+
+      const session = readSession()
+      if (session.user) {
+        writeSession({
+          ...session,
+          user: {
+            ...session.user,
+            displayName: nextProfile.displayName,
+            timezone: nextProfile.timezone,
+          },
+        })
+        refresh()
+      }
+
+      toast.success('Профиль сохранён')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось сохранить профиль')
+    } finally {
+      setIsSavingProfile(false)
+    }
+  }
+
+  const handleChangePassword = async (event: React.FormEvent) => {
+    event.preventDefault()
+
+    if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+      toast.error('Пароли не совпадают')
+      return
+    }
+
+    setIsSavingPassword(true)
+    try {
+      await changePassword({
+        currentPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword,
+      })
+      toast.success('Пароль изменён. Войдите заново.')
+    } catch (changeError) {
+      toast.error(changeError instanceof Error ? changeError.message : 'Не удалось сменить пароль')
+    } finally {
+      setIsSavingPassword(false)
+    }
+  }
+
+  const handleStartTelegramLink = async () => {
+    try {
+      setIsStartingLink(true)
+      const nextLinkData = await startTelegramLink()
+      setLinkData(nextLinkData)
+      setLinkPending(true)
+      toast.success('Ссылка для привязки Telegram создана')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось начать привязку Telegram')
+    } finally {
+      setIsStartingLink(false)
+    }
+  }
+
+  const handleCopyLink = async () => {
+    if (!linkData?.deepLink) {
+      return
+    }
+
+    try {
+      await navigator.clipboard.writeText(linkData.deepLink)
+      toast.success('Ссылка скопирована')
+    } catch {
+      toast.error('Не удалось скопировать ссылку')
+    }
+  }
+
+  const handleUnlinkTelegram = async () => {
+    try {
+      setIsUnlinking(true)
+      const nextProfile = await unlinkTelegram()
+      applyProfile(nextProfile)
+      setLinkData(null)
+      setLinkPending(false)
+      toast.success('Telegram-аккаунт отвязан')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось отвязать Telegram')
+    } finally {
+      setIsUnlinking(false)
+    }
+  }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6">
       <div>
-        <h1 className="text-3xl font-bold text-gray-900">Профиль</h1>
-        <p className="text-gray-600 mt-1">Управление настройками аккаунта</p>
+        <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Профиль</h1>
+        <p className="mt-1 text-gray-600 dark:text-gray-400">Базовые настройки аккаунта и привязка Telegram</p>
       </div>
 
-      {/* Account Info */}
       <Card>
         <CardHeader>
           <CardTitle>Информация об аккаунте</CardTitle>
         </CardHeader>
         <CardContent className="space-y-6">
           <div className="flex items-center gap-4">
-            <UserAvatar name={currentUser.displayName} size="xl" />
+            <UserAvatar name={displayName || currentUser.displayName} size="xl" />
             <div>
-              <h2 className="text-2xl font-bold">{currentUser.displayName}</h2>
+              <h2 className="text-2xl font-bold">{displayName || currentUser.displayName}</h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400">{currentUser.email}</p>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
             <div>
-              <Label className="text-gray-600">Email</Label>
+              <Label className="text-gray-600 dark:text-gray-400">Email</Label>
               <div className="mt-1 font-mono text-sm">{currentUser.email}</div>
             </div>
             <div>
-              <Label className="text-gray-600">ID пользователя</Label>
+              <Label className="text-gray-600 dark:text-gray-400">ID пользователя</Label>
               <div className="mt-1 font-mono text-sm">{currentUser.id}</div>
             </div>
-            <div>
-              <Label className="text-gray-600">Дата создания</Label>
-              <div className="mt-1 flex items-center gap-2">
-                <Calendar className="size-4 text-gray-400" />
-                {new Date(currentUser.createdAt).toLocaleDateString("ru-RU")}
-              </div>
+            <div className="md:col-span-2">
+              <Label className="text-gray-600 dark:text-gray-400">Текущий часовой пояс</Label>
+              <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">{selectedTimezoneLabel}</div>
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Display Name */}
       <Card>
         <CardHeader>
-          <CardTitle>Отображаемое имя</CardTitle>
+          <CardTitle>Настройки профиля</CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSaveName} className="space-y-4">
+          <form onSubmit={(event) => void handleSaveProfile(event)} className="space-y-4">
             <div>
               <Label htmlFor="display-name" className="mb-2 block">
                 Имя
@@ -240,254 +273,129 @@ export function ProfilePage() {
               <Input
                 id="display-name"
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Ваше имя"
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={isLoadingProfile || isSavingProfile}
               />
-              <p className="text-xs text-gray-500 mt-1">
-                Это имя видят другие участники команды
-              </p>
             </div>
-            <Button type="submit" disabled={!displayName.trim()}>
-              <Save className="size-4 mr-2" />
-              Сохранить
+
+            <div>
+              <Label htmlFor="timezone" className="mb-2 block">
+                Часовой пояс
+              </Label>
+              <Select value={timezone} onValueChange={setTimezone} disabled={isLoadingProfile || isSavingProfile}>
+                <SelectTrigger className="w-full sm:w-[420px]">
+                  <SelectValue placeholder="Выберите часовой пояс" />
+                </SelectTrigger>
+                <SelectContent>
+                  {TIMEZONE_OPTIONS.map((item) => (
+                    <SelectItem key={item.value} value={item.value}>
+                      {item.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <Button type="submit" disabled={isLoadingProfile || isSavingProfile}>
+              <Save className="mr-2 size-4" />
+              {isSavingProfile ? 'Сохранение...' : 'Сохранить'}
             </Button>
           </form>
         </CardContent>
       </Card>
 
-      {/* Timezone */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Globe className="size-5" />
-            Часовой пояс
+            Привязка Telegram-аккаунта
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div>
-            <Label htmlFor="timezone" className="mb-2 block">
-              Временная зона
-            </Label>
-            <Select value={timezone} onValueChange={setTimezone}>
-              <SelectTrigger className="w-full sm:w-80">
-                <SelectValue placeholder="Выберите часовой пояс" />
-              </SelectTrigger>
-              <SelectContent>
-                {TIMEZONES.map((tz) => (
-                  <SelectItem key={tz.value} value={tz.value}>
-                    {tz.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-gray-500 mt-1">
-              Все даты и время в интерфейсе будут отображаться в выбранном
-              часовом поясе
-            </p>
-          </div>
-          <Button onClick={handleSaveTimezone}>
-            <Save className="size-4 mr-2" />
-            Сохранить
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* Telegram */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Send className="size-5" />
-            Привязка Telegram
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {tgLinked ? (
-            <>
-              <div className="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded-lg">
-                <CheckCircle className="size-5 text-green-600 flex-shrink-0" />
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-green-900">
+          {profile?.telegramUsername ? (
+            <div className="rounded-lg border border-green-200 bg-green-50 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-medium text-green-900">
+                    <LinkIcon className="size-4" />
                     Telegram привязан
                   </div>
-                  <a
-                    href={`https://t.me/${currentUser.telegramUsername || "user_tg"}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-sm text-green-700 hover:text-green-800 inline-flex items-center gap-1"
-                  >
-                    @{currentUser.telegramUsername || "user_tg"}
-                    <ExternalLink className="size-3" />
-                  </a>
-                  {currentUser.telegramLinkedAt && (
-                    <div className="text-xs text-green-600 mt-0.5">
-                      Привязан{" "}
-                      {new Date(
-                        currentUser.telegramLinkedAt
-                      ).toLocaleDateString("ru-RU")}
-                    </div>
-                  )}
+                  <div className="mt-2 text-sm text-green-800">
+                    Username: <span className="font-mono">@{profile.telegramUsername}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-green-700">
+                    Связано: {profile.telegramLinkedAt ? new Date(profile.telegramLinkedAt).toLocaleString('ru-RU') : '—'}
+                  </div>
                 </div>
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-gray-400 hover:text-red-600"
-                      title="Отвязать Telegram"
-                    >
-                      <Unlink className="size-4" />
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Отвязать Telegram?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Привязка аккаунта @{currentUser.telegramUsername || "user_tg"} будет удалена.
-                        Вы не сможете создавать рекламные посты через бота, пока не привяжете аккаунт заново.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Отмена</AlertDialogCancel>
-                      <AlertDialogAction
-                        onClick={handleUnlink}
-                        className="bg-red-600 hover:bg-red-700"
-                      >
-                        Отвязать
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+                <Button variant="outline" onClick={() => void handleUnlinkTelegram()} disabled={isUnlinking} className="border-red-200 text-red-600 hover:bg-red-50 dark:border-red-800/50 dark:text-red-400 dark:hover:bg-red-900/20">
+                  <Unplug className="mr-2 size-4" />
+                  {isUnlinking ? 'Отвязка...' : 'Отвязать'}
+                </Button>
               </div>
-              <p className="text-xs text-gray-500">
-                Привязанный аккаунт используется для создания рекламных постов
-                через команду{" "}
-                <code className="bg-gray-100 px-1 rounded">/ads</code> в боте.
-              </p>
-            </>
+            </div>
           ) : (
-            <>
-              <p className="text-sm text-gray-600">
-                Привяжите Telegram-аккаунт, чтобы создавать рекламные посты
-                через бота. После привязки вы сможете отправлять сообщения боту и
-                сохранять их как рекламные посты командой{" "}
-                <code className="bg-gray-100 px-1 rounded text-xs">/ads</code>.
-              </p>
-              <Button onClick={handleStartLinking}>
-                <Send className="size-4 mr-2" />
-                Привязать Telegram
-              </Button>
-            </>
+            <div className="rounded-lg border bg-gray-50 p-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+              Telegram-аккаунт ещё не привязан. После привязки вы сможете создавать рекламные посты через бота и сохранять их в нужную команду.
+            </div>
           )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={() => void handleStartTelegramLink()} disabled={isStartingLink}>
+              <LinkIcon className="mr-2 size-4" />
+              {isStartingLink ? 'Создание ссылки...' : profile?.telegramUsername ? 'Перепривязать Telegram' : 'Привязать Telegram'}
+            </Button>
+            <Button variant="outline" onClick={() => void handleCheckTelegramLink()} disabled={isCheckingLink}>
+              {isCheckingLink ? 'Проверка...' : 'Проверить статус'}
+            </Button>
+          </div>
+
+          {linkPending && !profile?.telegramUsername ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              Ожидается подтверждение в Telegram. Откройте бота, нажмите старт по deep link и вернитесь сюда.
+            </div>
+          ) : null}
+
+          {linkData ? (
+            <div className="grid gap-4 rounded-lg border p-4 dark:border-gray-800 md:grid-cols-[1fr_220px]">
+              <div className="space-y-3">
+                <div>
+                  <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Шаг 1. Откройте deep link</div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <a href={linkData.deepLink} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 dark:border-gray-700 dark:text-blue-400 dark:hover:bg-blue-900/20">
+                      <ExternalLink className="size-4" />
+                      {botUsername ? `Открыть @${botUsername}` : 'Открыть Telegram-бота'}
+                    </a>
+                    <Button variant="outline" onClick={() => void handleCopyLink()}>
+                      <Copy className="mr-2 size-4" />
+                      Копировать ссылку
+                    </Button>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="text-sm font-medium text-gray-900 dark:text-gray-100">Шаг 2. Нажмите Start в Telegram</div>
+                  <div className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    Бот подтвердит привязку и аккаунт автоматически появится в профиле.
+                  </div>
+                </div>
+
+                <div className="rounded-md border bg-gray-50 p-3 dark:border-gray-800 dark:bg-gray-900">
+                  <div className="mb-1 flex items-center gap-2 text-sm font-medium text-gray-900 dark:text-gray-100">
+                    <QrCode className="size-4" />
+                    Deep link
+                  </div>
+                  <div className="break-all font-mono text-xs text-gray-500 dark:text-gray-400">{linkData.deepLink}</div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-center rounded-lg border bg-white p-3 dark:border-gray-800 dark:bg-gray-950">
+                <img src={linkData.qrUrl} alt="Telegram link QR" className="h-48 w-48 rounded-md" />
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
-      {/* Telegram linking dialog */}
-      <Dialog open={tgDialogOpen} onOpenChange={setTgDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader className="pr-8">
-            <DialogTitle className="flex items-center gap-2">
-              <Send className="size-5 text-blue-600" />
-              Привязка Telegram
-            </DialogTitle>
-            <DialogDescription>
-              Отсканируйте QR-код или откройте ссылку, чтобы привязать аккаунт
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="space-y-5 pr-1">
-            {/* QR Code */}
-            <div className="flex justify-center">
-              <div className="bg-white dark:bg-white border-2 border-gray-100 rounded-xl p-3 shadow-sm">
-                <img
-                  src={qrUrl(deepLink, 200)}
-                  alt="QR-код для привязки Telegram"
-                  className="size-[200px] rounded"
-                />
-              </div>
-            </div>
-
-            {/* Direct link button */}
-            <div className="space-y-2">
-              <a
-                href={deepLink}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block"
-              >
-                <Button className="w-full" variant="default">
-                  <ExternalLink className="size-4 mr-2" />
-                  Открыть бота в Telegram
-                </Button>
-              </a>
-
-              {/* Copy link */}
-              <div className="flex items-center gap-2">
-                <div className="flex-1 bg-gray-50 border rounded-lg px-3 py-2 text-xs font-mono text-gray-500 truncate">
-                  {deepLink}
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCopyLink}
-                  className="flex-shrink-0"
-                >
-                  {linkCopied ? (
-                    <Check className="size-4 text-green-600" />
-                  ) : (
-                    <Copy className="size-4" />
-                  )}
-                </Button>
-              </div>
-            </div>
-
-            {/* Instructions */}
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-              <ol className="space-y-1.5 text-xs text-blue-800">
-                <li className="flex gap-2">
-                  <span className="size-4 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-[10px] font-bold">
-                    1
-                  </span>
-                  Отсканируйте QR-код или нажмите «Открыть бота в Telegram»
-                </li>
-                <li className="flex gap-2">
-                  <span className="size-4 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-[10px] font-bold">
-                    2
-                  </span>
-                  В Telegram нажмите «Начать» (Start)
-                </li>
-                <li className="flex gap-2">
-                  <span className="size-4 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-[10px] font-bold">
-                    3
-                  </span>
-                  Вернитесь сюда и нажмите «Я привязал аккаунт»
-                </li>
-              </ol>
-            </div>
-
-            {/* Confirm button */}
-            <Button
-              className="w-full"
-              variant="outline"
-              onClick={handleCheckLink}
-              disabled={tgLinking}
-            >
-              {tgLinking ? (
-                <>
-                  <Loader2 className="size-4 mr-2 animate-spin" />
-                  Поверяем привязку...
-                </>
-              ) : (
-                <>
-                  <CheckCircle className="size-4 mr-2" />
-                  Я привязал аккаунт
-                </>
-              )}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* Change Password */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -496,7 +404,7 @@ export function ProfilePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleChangePassword} className="space-y-4">
+          <form onSubmit={(event) => void handleChangePassword(event)} className="space-y-4">
             <div>
               <Label htmlFor="current-password" className="mb-2 block">
                 Текущий пароль
@@ -505,12 +413,7 @@ export function ProfilePage() {
                 id="current-password"
                 type="password"
                 value={passwordForm.currentPassword}
-                onChange={(e) =>
-                  setPasswordForm({
-                    ...passwordForm,
-                    currentPassword: e.target.value,
-                  })
-                }
+                onChange={(event) => setPasswordForm((state) => ({ ...state, currentPassword: event.target.value }))}
                 required
               />
             </div>
@@ -523,16 +426,10 @@ export function ProfilePage() {
                 id="new-password"
                 type="password"
                 value={passwordForm.newPassword}
-                onChange={(e) =>
-                  setPasswordForm({
-                    ...passwordForm,
-                    newPassword: e.target.value,
-                  })
-                }
+                onChange={(event) => setPasswordForm((state) => ({ ...state, newPassword: event.target.value }))}
                 required
                 minLength={8}
               />
-              <p className="text-xs text-gray-500 mt-1">Минимум 8 символов</p>
             </div>
 
             <div>
@@ -543,22 +440,17 @@ export function ProfilePage() {
                 id="confirm-password"
                 type="password"
                 value={passwordForm.confirmPassword}
-                onChange={(e) =>
-                  setPasswordForm({
-                    ...passwordForm,
-                    confirmPassword: e.target.value,
-                  })
-                }
+                onChange={(event) => setPasswordForm((state) => ({ ...state, confirmPassword: event.target.value }))}
                 required
               />
             </div>
 
-            <Button type="submit" className="w-full md:w-auto">
-              Изменить пароль
+            <Button type="submit" disabled={isSavingPassword}>
+              {isSavingPassword ? 'Сохранение...' : 'Изменить пароль'}
             </Button>
           </form>
         </CardContent>
       </Card>
     </div>
-  );
+  )
 }

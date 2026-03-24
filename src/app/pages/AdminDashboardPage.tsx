@@ -1,282 +1,317 @@
-import { Link } from "react-router";
+import { Link } from 'react-router'
+import { useEffect, useMemo, useState } from 'react'
 import {
-  Users,
-  Radio,
-  Rss,
-  AlertCircle,
-  CheckCircle,
-  TrendingUp,
-  Clock,
-  Database,
   Activity,
+  AlertCircle,
+  Brain,
+  Database,
   DollarSign,
-} from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
-import { Badge } from "../components/ui/badge";
-import { Progress } from "../components/ui/progress";
-import { mockTeams, mockChannels, mockSources, mockUsers, mockJobs, mockLLMTraces, mockAdmins } from "../data/mock-data";
+  LayoutDashboard,
+  Play,
+  Radio,
+  RefreshCw,
+  Rss,
+  Users,
+} from 'lucide-react'
+import { toast } from 'sonner'
+
+import {
+  getAdminDashboard,
+  getAdminSchedulerStatus,
+  runAdminSchedulerNow,
+  type AdminDashboardData,
+  type AdminSchedulerStatus,
+} from '../services/adminService'
+import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
+import { Badge } from '../components/ui/badge'
+import { Button } from '../components/ui/button'
+
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return '—'
+  return new Date(value).toLocaleString('ru-RU')
+}
 
 export function AdminDashboardPage() {
-  const totalUsers = mockUsers.length;
-  const activeUsers = mockUsers.filter((u) => u.isActive).length;
-  const totalAdmins = mockAdmins.length;
-  
-  const totalTeams = mockTeams.length;
-  
-  const totalChannels = mockChannels.length;
-  const activeChannels = mockChannels.filter((c) => c.isActive).length;
-  
-  const totalSources = mockSources.length;
-  const activeSources = mockSources.filter((s) => s.isActive).length;
-  
-  const failedJobs = mockJobs.filter((j) => j.status === "failed").length;
-  const runningJobs = mockJobs.filter((j) => j.status === "running").length;
-  
-  const totalLLMCost = mockLLMTraces.reduce((sum, trace) => sum + trace.cost, 0);
-  const totalTokens = mockLLMTraces.reduce((sum, trace) => sum + trace.totalTokens, 0);
+  const [dashboard, setDashboard] = useState<AdminDashboardData | null>(null)
+  const [scheduler, setScheduler] = useState<AdminSchedulerStatus | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isRunningScheduler, setIsRunningScheduler] = useState(false)
+
+  const load = async () => {
+    setIsLoading(true)
+    try {
+      const [dashboardData, schedulerData] = await Promise.all([getAdminDashboard(), getAdminSchedulerStatus()])
+      setDashboard(dashboardData)
+      setScheduler(schedulerData)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось загрузить admin dashboard')
+    } finally {
+      setIsLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    void load()
+  }, [])
+
+  const metrics = useMemo(() => {
+    if (!dashboard) {
+      return []
+    }
+
+    return [
+      {
+        label: 'Пользователи',
+        value: String(dashboard.kpi.users),
+        caption: 'Всего в системе',
+        icon: Users,
+        tone: 'text-blue-600',
+      },
+      {
+        label: 'Команды',
+        value: `${dashboard.kpi.activeTeams}/${dashboard.kpi.teams}`,
+        caption: 'Активные / всего',
+        icon: LayoutDashboard,
+        tone: 'text-green-600',
+      },
+      {
+        label: 'Каналы',
+        value: `${dashboard.kpi.activeChannels}/${dashboard.kpi.channels}`,
+        caption: 'Активные / всего',
+        icon: Radio,
+        tone: 'text-purple-600',
+      },
+      {
+        label: 'Источники',
+        value: `${dashboard.kpi.activeSources}/${dashboard.kpi.sources}`,
+        caption: 'Активные / всего',
+        icon: Rss,
+        tone: 'text-amber-600',
+      },
+      {
+        label: 'Материалы за 24ч',
+        value: String(dashboard.kpi.items24h),
+        caption: 'Новые items',
+        icon: Database,
+        tone: 'text-sky-600 dark:text-sky-400',
+      },
+      {
+        label: 'Посты за 24ч',
+        value: String(dashboard.kpi.posts24h),
+        caption: 'Опубликовано',
+        icon: Play,
+        tone: 'text-emerald-600',
+      },
+      {
+        label: 'LLM токены за 24ч',
+        value: dashboard.kpi.llmTokens24h.toLocaleString('ru-RU'),
+        caption: `${dashboard.kpi.llmRequests24h} запросов`,
+        icon: Brain,
+        tone: 'text-pink-600 dark:text-pink-400',
+      },
+      {
+        label: 'Ошибки задач за 24ч',
+        value: String(dashboard.kpi.failedJobs24h),
+        caption: `${dashboard.kpi.runningJobs} running`,
+        icon: AlertCircle,
+        tone: 'text-red-600',
+      },
+    ]
+  }, [dashboard])
+
+  const handleRunScheduler = async () => {
+    setIsRunningScheduler(true)
+    try {
+      const schedulerData = await runAdminSchedulerNow()
+      setScheduler(schedulerData)
+      const dashboardData = await getAdminDashboard()
+      setDashboard(dashboardData)
+      toast.success('Планировщик запущен вручную')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось запустить планировщик')
+    } finally {
+      setIsRunningScheduler(false)
+    }
+  }
+
+  if (isLoading && !dashboard) {
+    return <div className="text-sm text-muted-foreground">Загрузка dashboard...</div>
+  }
+
+  if (!dashboard || !scheduler) {
+    return <div className="text-sm text-red-500">Не удалось загрузить данные admin dashboard</div>
+  }
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">Администраторский дашборд</h1>
-        <p className="text-gray-600">Глобальная статистика и мониторинг системы</p>
+      <div className="rounded-2xl border border-indigo-200 bg-gradient-to-r from-indigo-50 via-background to-sky-50 p-5 dark:border-indigo-900 dark:from-indigo-950/20 dark:via-background dark:to-sky-950/20">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-foreground">Администраторский дашборд</h1>
+          <p className="text-muted-foreground">Глобальная сводка по системе, LLM и планировщику.</p>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Этот экран помогает быстро оценить состояние платформы, нагрузку на scheduler и свежую активность по задачам и источникам.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => void load()} disabled={isLoading} className="border-border bg-background/80 backdrop-blur">
+            <RefreshCw className={`mr-2 size-4 ${isLoading ? 'animate-spin' : ''}`} />
+            Обновить
+          </Button>
+          <Button onClick={() => void handleRunScheduler()} disabled={isRunningScheduler || scheduler.isTickRunning}>
+            <Play className={`mr-2 size-4 ${isRunningScheduler ? 'animate-spin' : ''}`} />
+            Run scheduler
+          </Button>
+        </div>
+      </div>
       </div>
 
-      {/* System Status */}
       <Card>
         <CardHeader>
-          <CardTitle>Статус системы</CardTitle>
+          <CardTitle>Состояние системы</CardTitle>
         </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            <div className="flex items-center gap-3 p-4 bg-green-50 rounded-lg">
-              <div className="size-3 rounded-full bg-green-500" />
-              <div>
-                <div className="font-medium text-gray-900">Userbot</div>
-                <div className="text-sm text-gray-600">Онлайн и активен</div>
-              </div>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div className="rounded-lg bg-muted/50 p-4">
+            <div className="mb-1 text-sm text-muted-foreground">Планировщик</div>
+            <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+              <span className={`size-2 rounded-full ${scheduler.enabled ? 'bg-green-500' : 'bg-gray-400'}`} />
+              {scheduler.enabled ? 'Включен' : 'Выключен'}
             </div>
-            <div className="flex items-center gap-3 p-4 bg-green-50 rounded-lg">
-              <div className="size-3 rounded-full bg-green-500" />
-              <div>
-                <div className="font-medium text-gray-900">Планировщик</div>
-                <div className="text-sm text-gray-600">{runningJobs} задач</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 p-4 bg-blue-50 rounded-lg">
-              <div className="size-3 rounded-full bg-blue-500" />
-              <div>
-                <div className="font-medium text-gray-900">База данных</div>
-                <div className="text-sm text-gray-600">Работает</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 p-4 bg-purple-50 rounded-lg">
-              <div className="size-3 rounded-full bg-purple-500" />
-              <div>
-                <div className="font-medium text-gray-900">LLM API</div>
-                <div className="text-sm text-gray-600">Доступен</div>
-              </div>
-            </div>
+            <div className="mt-1 text-xs text-muted-foreground">Интервал: {scheduler.intervalSec} сек</div>
+          </div>
+          <div className="rounded-lg bg-muted/50 p-4">
+            <div className="mb-1 text-sm text-muted-foreground">Последний старт</div>
+            <div className="text-sm font-medium text-foreground">{formatDateTime(scheduler.lastTickStartedAt)}</div>
+          </div>
+          <div className="rounded-lg bg-muted/50 p-4">
+            <div className="mb-1 text-sm text-muted-foreground">Последнее завершение</div>
+            <div className="text-sm font-medium text-foreground">{formatDateTime(scheduler.lastTickFinishedAt)}</div>
+          </div>
+          <div className="rounded-lg bg-muted/50 p-4">
+            <div className="mb-1 text-sm text-muted-foreground">Следующий тик</div>
+            <div className="text-sm font-medium text-foreground">{formatDateTime(scheduler.nextTickAt)}</div>
           </div>
         </CardContent>
       </Card>
 
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">
-              Пользователи
-            </CardTitle>
-            <Users className="size-5 text-blue-600" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-gray-900">
-              {activeUsers}/{totalUsers}
-            </div>
-            <p className="text-xs text-gray-500 mt-1">
-              {totalAdmins} администраторов
-            </p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">
-              Команды
-            </CardTitle>
-            <Users className="size-5 text-green-600" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-gray-900">
-              {totalTeams}
-            </div>
-            <p className="text-xs text-gray-500 mt-1">Команд в системе</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">
-              Каналы
-            </CardTitle>
-            <Radio className="size-5 text-purple-600" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-gray-900">
-              {activeChannels}/{totalChannels}
-            </div>
-            <p className="text-xs text-gray-500 mt-1">Активные каналы</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-gray-600">
-              Ошибки задач
-            </CardTitle>
-            <AlertCircle className="size-5 text-red-600" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold text-gray-900">{failedJobs}</div>
-            <p className="text-xs text-gray-500 mt-1">За последние 24ч</p>
-          </CardContent>
-        </Card>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {metrics.map((metric) => {
+          const Icon = metric.icon
+          return (
+            <Card key={metric.label}>
+              <CardHeader className="flex flex-row items-center justify-between pb-2">
+                <CardTitle className="text-sm font-medium text-muted-foreground">{metric.label}</CardTitle>
+                <Icon className={`size-5 ${metric.tone}`} />
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold text-foreground">{metric.value}</div>
+                <p className="mt-1 text-xs text-muted-foreground">{metric.caption}</p>
+              </CardContent>
+            </Card>
+          )
+        })}
       </div>
 
-      {/* LLM Analytics */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>LLM Аналитика</CardTitle>
+            <CardTitle>LLM за 24 часа</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-4 bg-purple-50 rounded-lg">
-                <div>
-                  <div className="text-sm text-purple-700 mb-1">Всего токенов</div>
-                  <div className="text-2xl font-bold text-purple-900">
-                    {totalTokens.toLocaleString('ru-RU')}
-                  </div>
-                </div>
-                <Activity className="size-8 text-purple-600" />
-              </div>
-
-              <div className="flex items-center justify-between p-4 bg-green-50 rounded-lg">
-                <div>
-                  <div className="text-sm text-green-700 mb-1">Общая стоимость</div>
-                  <div className="text-2xl font-bold text-green-900">
-                    ${totalLLMCost.toFixed(2)}
-                  </div>
-                </div>
-                <DollarSign className="size-8 text-green-600" />
-              </div>
-
-              <div className="pt-3 border-t">
-                <div className="flex justify-between text-sm mb-2">
-                  <span className="text-gray-600">Средняя стоимость запроса</span>
-                  <span className="font-medium text-gray-900">
-                    ${(totalLLMCost / mockLLMTraces.length).toFixed(4)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-600">Всего запросов</span>
-                  <span className="font-medium text-gray-900">{mockLLMTraces.length}</span>
-                </div>
-              </div>
+          <CardContent className="space-y-4">
+            <div className="rounded-lg border border-pink-500/20 bg-pink-500/10 p-4">
+              <div className="mb-1 text-sm text-pink-700 dark:text-pink-300">Стоимость</div>
+              <div className="text-2xl font-bold text-pink-900 dark:text-pink-100">${dashboard.kpi.llmCost24h.toFixed(4)}</div>
             </div>
+            <div className="rounded-lg border border-sky-500/20 bg-sky-500/10 p-4">
+              <div className="mb-1 text-sm text-sky-700 dark:text-sky-300">Токены</div>
+              <div className="text-2xl font-bold text-sky-900 dark:text-sky-100">{dashboard.kpi.llmTokens24h.toLocaleString('ru-RU')}</div>
+            </div>
+            <Link to="/admin/llm-analytics" className="inline-flex text-sm text-primary hover:underline">
+              Открыть полную LLM аналитику
+            </Link>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>Активность публикаций</CardTitle>
+            <CardTitle>Последний тик scheduler</CardTitle>
           </CardHeader>
-          <CardContent>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-3 bg-green-50 rounded-lg">
-                <div>
-                  <div className="text-2xl font-bold text-green-900">156</div>
-                  <p className="text-sm text-green-700">Успешных постов сегодня</p>
-                </div>
-                <TrendingUp className="size-8 text-green-600" />
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-600">Успешность</span>
-                  <span className="font-medium text-gray-900">94.2%</span>
-                </div>
-                <Progress value={94.2} className="h-2" />
-              </div>
-
-              <div className="pt-3 border-t space-y-2">
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-600">Источники с ошибками</span>
-                  <span className="font-medium text-red-600">
-                    {mockSources.filter((s) => s.status === "error").length}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-600">Активные источники</span>
-                  <span className="font-medium text-green-600">{activeSources}</span>
-                </div>
-              </div>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <div className="flex justify-between">
+              <span>Источников due</span>
+              <span className="font-medium text-foreground">{scheduler.lastTickSummary?.dueSources ?? 0}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Source jobs создано</span>
+              <span className="font-medium text-foreground">{scheduler.lastTickSummary?.createdSourceJobs ?? 0}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Channel refresh jobs</span>
+              <span className="font-medium text-foreground">{scheduler.lastTickSummary?.createdChannelRefreshJobs ?? 0}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Уже в очереди</span>
+              <span className="font-medium text-foreground">
+                {(scheduler.lastTickSummary?.skippedSourceAlreadyQueued ?? 0) + (scheduler.lastTickSummary?.skippedChannelRefreshAlreadyQueued ?? 0)}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span>Ошибок</span>
+              <span className="font-medium text-red-600">
+                {(scheduler.lastTickSummary?.failedSources ?? 0) + (scheduler.lastTickSummary?.failedChannels ?? 0)}
+              </span>
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Quick Links */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Link to="/admin/users">
-          <Card className="hover:shadow-md transition-shadow cursor-pointer">
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 bg-blue-50 rounded-lg">
-                  <Users className="size-6 text-blue-600" />
-                </div>
-                <div>
-                  <div className="font-medium text-gray-900">Управление пользователями</div>
-                  <div className="text-sm text-gray-600">{totalUsers} пользователей</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>Последние задачи</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {dashboard.recentJobs.length === 0 ? (
+              <div className="text-sm text-muted-foreground">Задач пока нет</div>
+            ) : (
+              dashboard.recentJobs.map((job) => (
+                <Link
+                  key={job.id}
+                  to={`/admin/jobs/${job.id}`}
+                  state={{ backTo: '/admin/dashboard' }}
+                  className="block rounded-lg border border-border p-3 transition-colors hover:bg-muted/50"
+                >
+                  <div className="mb-1 flex items-center justify-between gap-3">
+                    <div className="font-medium text-foreground">{job.type}</div>
+                    <Badge variant="outline">{job.status}</Badge>
+                  </div>
+                  <div className="text-xs text-muted-foreground">{new Date(job.createdAt).toLocaleString('ru-RU')}</div>
+                  <div className="mt-2 text-xs text-muted-foreground">ID: {job.id}</div>
+                </Link>
+              ))
+            )}
+          </CardContent>
+        </Card>
 
-        <Link to="/admin/teams">
-          <Card className="hover:shadow-md transition-shadow cursor-pointer">
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 bg-green-50 rounded-lg">
-                  <Users className="size-6 text-green-600" />
+        <Card>
+          <CardHeader>
+            <CardTitle>Последние ошибки источников</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {dashboard.recentErrors.length === 0 ? (
+              <div className="text-sm text-muted-foreground">Свежих ошибок нет</div>
+            ) : (
+              dashboard.recentErrors.map((error) => (
+                <div key={error.sourceId} className="rounded-lg border border-red-500/20 bg-red-500/10 p-3">
+                  <div className="font-medium text-red-800 dark:text-red-200">{error.sourceName}</div>
+                  <div className="mt-1 text-sm text-red-700 dark:text-red-300">{error.lastError ?? 'Неизвестная ошибка'}</div>
+                  <div className="mt-2 text-xs text-red-600 dark:text-red-400">{formatDateTime(error.updatedAt)}</div>
                 </div>
-                <div>
-                  <div className="font-medium text-gray-900">Все команды</div>
-                  <div className="text-sm text-gray-600">{totalTeams} команд</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
-
-        <Link to="/admin/llm-analytics">
-          <Card className="hover:shadow-md transition-shadow cursor-pointer">
-            <CardContent className="pt-6">
-              <div className="flex items-center gap-4">
-                <div className="p-3 bg-purple-50 rounded-lg">
-                  <Activity className="size-6 text-purple-600" />
-                </div>
-                <div>
-                  <div className="font-medium text-gray-900">LLM Аналитика</div>
-                  <div className="text-sm text-gray-600">${totalLLMCost.toFixed(2)} использовано</div>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </Link>
+              ))
+            )}
+          </CardContent>
+        </Card>
       </div>
     </div>
-  );
+  )
 }

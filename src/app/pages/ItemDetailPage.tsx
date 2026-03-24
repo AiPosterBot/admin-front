@@ -1,195 +1,417 @@
-import { Link, useParams, useNavigate } from "react-router";
-import { ArrowLeft, Image, ExternalLink, CheckCircle, XCircle, Calendar, Database } from "lucide-react";
-import { Badge } from "../components/ui/badge";
-import { Button } from "../components/ui/button";
-// ── Service + guard layer ─────────────────────────────────────────────
-import * as itemService from "../services/itemService";
-import * as postService from "../services/postService";
-import { useTeamScopedEntity } from "../hooks/useTeamScopedEntity";
-import { TeamScopeGuard } from "../components/TeamScopeGuard";
-import { useTeam } from "../context/TeamContext";
+import { useState } from 'react'
+import { Link, useNavigate, useParams } from 'react-router'
+import {
+  ArrowLeft,
+  Calendar,
+  CheckCircle,
+  Database,
+  ExternalLink,
+  Image,
+  Loader2,
+  Megaphone,
+  PauseCircle,
+  PlayCircle,
+  Send,
+  XCircle,
+} from 'lucide-react'
+import { toast } from 'sonner'
 
-export function ItemDetailPage() {
-  const { itemId } = useParams<{ itemId: string }>();
-  const navigate = useNavigate();
-  const { currentTeamId } = useTeam();
+import { MediaStatusHint } from '../components/MediaStatusHint'
+import { Badge } from '../components/ui/badge'
+import { Button } from '../components/ui/button'
+import { useTeam } from '../context/TeamContext'
+import { useAsync } from '../lib/asyncState'
+import { getLimitErrorMessageByCode } from '../lib/team-limit-messages'
+import { getChannelDisplayLabel, getChannelPublishModeLabel, getChannelTechnicalId, publishChannelItem } from '../services/channelService'
+import { getItemDetailById } from '../services/itemService'
+import { getJobById, type JobView } from '../services/jobService'
 
-  const { state: itemState } = useTeamScopedEntity(
-    () => itemService.getItemById(itemId!, currentTeamId!),
-    [itemId, currentTeamId],
-    "/items",
-  );
+function decodeHtmlEntities(content: string) {
+  if (typeof window === 'undefined') {
+    return content.replace(/&nbsp;/g, ' ')
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.innerHTML = content
+  return textarea.value.replace(/\u00a0/g, ' ')
+}
+
+interface PublishProgressState {
+  channelId: string
+  channelName?: string
+  jobId: string | null
+  stageText: string
+}
+
+function getPublishStageText(job: JobView | null) {
+  if (!job) {
+    return 'Подготавливаем публикацию...'
+  }
+
+  if (job.status === 'failed' || job.status === 'timed_out' || job.status === 'canceled') {
+    return 'Публикация завершилась ошибкой'
+  }
+
+  const delivery = job.delivery
+  if (!delivery) {
+    return job.status === 'running' ? 'Генерируем и подготавливаем пост...' : 'Ставим публикацию в очередь...'
+  }
+
+  if (delivery.outboxStatus === 'sending' || delivery.postedItemStatus === 'publishing') {
+    return 'Отправляем пост в Telegram...'
+  }
+
+  if (delivery.outboxStatus === 'pending' || delivery.postedItemStatus === 'queued') {
+    return 'Публикация в очереди, ждём отправку...'
+  }
+
+  if (delivery.outboxStatus === 'sent' || delivery.postedItemStatus === 'success') {
+    return 'Пост опубликован'
+  }
+
+  if (delivery.outboxStatus === 'failed' || delivery.postedItemStatus === 'failed' || delivery.outboxStatus === 'unknown') {
+    return 'Публикация завершилась ошибкой'
+  }
+
+  return 'Публикуем пост...'
+}
+
+function isPublishFinished(job: JobView | null) {
+  if (!job) {
+    return false
+  }
+
+  if (job.status === 'failed' || job.status === 'timed_out' || job.status === 'canceled') {
+    return true
+  }
+
+  const delivery = job.delivery
+  if (!delivery) {
+    return false
+  }
 
   return (
-    <TeamScopeGuard state={itemState} notFoundLabel="Материал не найден или недоступен в этой команде">
-    {(item) => {
-      const source = itemService.getItemSource(item);
-      const publications = postService.getPostsByItemId(item.id);
-      const isPublished = publications.length > 0;
+    delivery.outboxStatus === 'sent' ||
+    delivery.outboxStatus === 'failed' ||
+    delivery.outboxStatus === 'unknown' ||
+    delivery.postedItemStatus === 'success' ||
+    delivery.postedItemStatus === 'failed'
+  )
+}
 
-      return (
-        <div className="space-y-6 max-w-3xl">
-          {/* Back + header */}
-          <div>
-            <button
-              onClick={() => navigate(-1)}
-              className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 transition-colors mb-4"
-            >
-              <ArrowLeft className="size-4" />
-              Назад к контенту
-            </button>
+export function ItemDetailPage() {
+  const { itemId } = useParams<{ itemId: string }>()
+  const navigate = useNavigate()
+  const { currentTeamId } = useTeam()
+  const [publishProgress, setPublishProgress] = useState<PublishProgressState | null>(null)
 
-            <div className="flex items-start justify-between gap-4">
-              <h1 className="text-xl font-bold text-gray-900 leading-snug">{item.title}</h1>
-              {isPublished ? (
-                <Badge variant="default" className="whitespace-nowrap flex-shrink-0">
-                  Опубликован
-                </Badge>
-              ) : (
-                <Badge variant="secondary" className="whitespace-nowrap flex-shrink-0">
-                  Не опубликован
-                </Badge>
-              )}
-            </div>
+  const { state, invalidate } = useAsync(() => {
+    if (!itemId || !currentTeamId) {
+      return Promise.resolve(null)
+    }
 
-            {/* Meta */}
-            <div className="flex items-center gap-3 mt-2 text-xs text-gray-400 flex-wrap">
+    return getItemDetailById(itemId, currentTeamId, { fresh: true })
+  }, [itemId, currentTeamId], { pollMs: 15000 })
+
+  const handlePublish = async (channelId: string) => {
+    if (!itemId || !currentTeamId) {
+      return
+    }
+
+    const target = state.status === 'success' ? state.data.publishTargets.find((entry) => entry.id === channelId) : undefined
+    setPublishProgress({
+      channelId,
+      channelName: target?.name,
+      jobId: null,
+      stageText: 'Создаём задачу публикации...',
+    })
+
+    try {
+      const result = await publishChannelItem(channelId, itemId)
+      if (result.ok === false) {
+        toast.error(result.error)
+        return
+      }
+
+      const jobId = result.data.job.id
+      setPublishProgress((current) => (current ? { ...current, jobId, stageText: 'Ставим публикацию в очередь...' } : current))
+
+      while (true) {
+        const job = await getJobById(jobId, currentTeamId)
+        setPublishProgress((current) =>
+          current
+            ? {
+                ...current,
+                jobId,
+                stageText: getPublishStageText(job),
+              }
+            : current,
+        )
+
+        if (isPublishFinished(job)) {
+          await invalidate()
+
+          if (job?.delivery?.outboxStatus === 'sent' || job?.delivery?.postedItemStatus === 'success') {
+            toast.success('Пост опубликован')
+          } else {
+            toast.error(
+              getLimitErrorMessageByCode(
+                job?.diagnostics?.lastError?.code,
+                job?.diagnostics?.lastError?.details,
+                job?.delivery?.deliveryError ?? job?.error ?? 'Не удалось опубликовать пост',
+              ) ?? 'Не удалось опубликовать пост',
+            )
+          }
+          return
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 1500))
+      }
+    } finally {
+      setPublishProgress(null)
+    }
+  }
+
+  if (state.status === 'loading' || state.status === 'idle') {
+    return (
+      <div className="flex items-center justify-center py-24">
+        <Loader2 className="size-6 animate-spin text-gray-400" />
+      </div>
+    )
+  }
+
+  if (state.status === 'empty' || state.status === 'error') {
+    return (
+      <div className="py-24 text-center">
+        <p className="text-sm text-gray-500">Материал не найден или недоступен в этой команде.</p>
+      </div>
+    )
+  }
+
+  const detail = state.data
+  const { item, source, publications, publishTargets } = detail
+  const decodedContent = decodeHtmlEntities(item.content)
+  const isPublishing = publishProgress !== null
+
+  return (
+    <div className="max-w-4xl space-y-6">
+      <div>
+        <button
+          type="button"
+          onClick={() => navigate(-1)}
+          className="mb-4 flex items-center gap-1.5 text-sm text-gray-500 transition-colors hover:text-gray-800"
+        >
+          <ArrowLeft className="size-4" />
+          Назад к материалам
+        </button>
+
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0 flex-1">
+            <h1 className="text-xl font-bold leading-snug text-gray-900">{item.title}</h1>
+
+            <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-400">
               <div className="flex items-center gap-1">
                 <Database className="size-3.5" />
-                <Link
-                  to={`/sources/${item.sourceId}`}
-                  className="text-blue-500 hover:underline"
-                >
+                <Link to={`/sources/${item.sourceId}`} className="text-blue-500 hover:underline">
                   {item.sourceName}
                 </Link>
               </div>
               <span>·</span>
               <div className="flex items-center gap-1">
                 <Calendar className="size-3.5" />
-                <span>{new Date(item.extractedAt).toLocaleString("ru-RU")}</span>
+                <span>{new Date(item.extractedAt).toLocaleString('ru-RU')}</span>
               </div>
-              {source?.url && (
+              {item.url && (
                 <>
                   <span>·</span>
-                  <a
-                    href={source.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1 text-blue-500 hover:underline"
-                  >
+                  <a href={item.url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-blue-500 hover:underline">
                     <ExternalLink className="size-3" />
-                    Источник
+                    Открыть источник
                   </a>
+                </>
+              )}
+              {source?.type && (
+                <>
+                  <span>·</span>
+                  <span className="capitalize">{source.type}</span>
                 </>
               )}
             </div>
           </div>
 
-          {/* Media */}
-          {item.mediaUrl && (
-            <div className="bg-white rounded-lg border overflow-hidden">
-              <img
-                src={item.mediaUrl}
-                alt=""
-                className="w-full max-h-80 object-cover"
-              />
+          {publications.length > 0 ? <Badge>Опубликован</Badge> : <Badge variant="secondary">Не опубликован</Badge>}
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="space-y-6">
+          {item.mediaUrl && item.mediaPreviewAvailable !== false && (
+            <div className="overflow-hidden rounded-lg border border-border bg-card">
+              <img src={item.mediaUrl} alt="" className="max-h-96 w-full object-cover" />
             </div>
           )}
 
-          {/* Content */}
-          <div className="bg-white rounded-lg border p-5">
-            <h2 className="text-sm text-gray-400 mb-3 uppercase tracking-wide">Содержимое</h2>
-            {item.mediaUrl ? null : (
-              <div className="w-12 h-12 rounded bg-gray-50 border border-gray-100 flex items-center justify-center mb-4">
-                <Image className="size-5 text-gray-300" />
+          <div className="rounded-lg border border-border bg-card p-5">
+            <h2 className="mb-3 text-sm uppercase tracking-wide text-muted-foreground">Содержимое</h2>
+            {!item.mediaUrl && !item.hasMedia && (
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded border border-border bg-muted">
+                <Image className="size-5 text-muted-foreground" />
               </div>
             )}
-            <p className="text-gray-800 text-sm leading-relaxed whitespace-pre-line">{item.content}</p>
+            <MediaStatusHint
+              hasMedia={item.hasMedia}
+              mediaPreviewAvailable={item.mediaPreviewAvailable}
+              mediaPreviewRestrictedReason={item.mediaPreviewRestrictedReason}
+              className="mb-4"
+            />
+            <p className="whitespace-pre-line text-sm leading-relaxed text-foreground">{decodedContent}</p>
           </div>
 
-          {/* Publications */}
-          <div className="bg-white rounded-lg border">
-            <div className="px-5 py-4 border-b">
-              <h2 className="text-sm text-gray-400 uppercase tracking-wide">
+          <div className="rounded-lg border border-border bg-card">
+            <div className="border-b px-5 py-4">
+              <h2 className="text-sm uppercase tracking-wide text-muted-foreground">
                 Публикации
-                <span className="ml-2 text-gray-300">{publications.length}</span>
+                <span className="ml-2 text-muted-foreground">{publications.length}</span>
               </h2>
             </div>
 
             {publications.length === 0 ? (
-              <div className="px-5 py-8 text-center text-gray-400 text-sm">
-                Этот материал ещё не был опубликован ни в один канал
-              </div>
+              <div className="px-5 py-8 text-center text-sm text-muted-foreground">Этот материал еще не был опубликован ни в один канал.</div>
             ) : (
               <div className="divide-y">
-                {publications.map((pub) => (
-                  <div key={pub.id} className="cursor-pointer" onClick={() => navigate(`/posts/${pub.id}`)}>
-                  <div className="px-5 py-4 flex items-start gap-4 hover:bg-gray-50 transition-colors">
+                {publications.map((publication: any) => (
+                  <div
+                    key={publication.id}
+                    className="flex cursor-pointer items-start gap-4 px-5 py-4 transition-colors hover:bg-muted/40"
+                    onClick={() => navigate(`/posts/${publication.id}`)}
+                  >
                     <div className="mt-0.5 flex-shrink-0">
-                      {pub.status === "success" ? (
+                      {publication.status === 'success' ? (
                         <CheckCircle className="size-4 text-green-500" />
                       ) : (
                         <XCircle className="size-4 text-red-500" />
                       )}
                     </div>
 
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
                         <Link
-                          to={`/channels/${pub.channelId}`}
-                          className="font-medium text-sm text-gray-900 hover:text-blue-600"
-                          onClick={(e) => e.stopPropagation()}
+                          to={`/channels/${publication.channelId}`}
+                          className="text-sm font-medium text-foreground hover:text-primary"
+                          onClick={(event) => event.stopPropagation()}
                         >
-                          {pub.channelName}
+                          {publication.channelName}
                         </Link>
-                        <span className="text-xs text-gray-400">·</span>
-                        <span className="text-xs text-gray-400">
-                          {new Date(pub.postedAt).toLocaleString("ru-RU")}
-                        </span>
-                        {pub.status === "failed" && (
-                          <Badge variant="destructive" className="text-xs ml-auto">Ошибка</Badge>
+                        <span className="text-xs text-muted-foreground">·</span>
+                        <span className="text-xs text-muted-foreground">{new Date(publication.postedAt).toLocaleString('ru-RU')}</span>
+                        {publication.status !== 'success' && (
+                          <Badge variant="destructive" className="ml-auto text-xs">
+                            Ошибка
+                          </Badge>
                         )}
                       </div>
 
-                      {pub.status === "success" && (pub.views !== undefined || pub.reactions !== undefined) && (
-                        <div className="flex items-center gap-3 text-xs text-gray-400 mb-2">
-                          {pub.views !== undefined && <span>👁 {pub.views.toLocaleString("ru-RU")}</span>}
-                          {pub.reactions !== undefined && <span>❤️ {pub.reactions}</span>}
-                        </div>
+                      {publication.mediaUrl && publication.mediaPreviewAvailable !== false && (
+                        <img src={publication.mediaUrl} alt="" className="mb-2 max-h-48 w-full rounded-lg object-cover" />
+                      )}
+                      <MediaStatusHint
+                        hasMedia={publication.hasMedia}
+                        mediaPreviewAvailable={publication.mediaPreviewAvailable}
+                        mediaPreviewRestrictedReason={publication.mediaPreviewRestrictedReason}
+                        className="mb-2"
+                      />
+                      {publication.generatedContent && (
+                        <p className="line-clamp-4 rounded border border-border bg-muted/40 p-3 text-sm text-muted-foreground">{publication.generatedContent}</p>
                       )}
 
-                      {pub.mediaUrl && (
-                        <img
-                          src={pub.mediaUrl}
-                          alt=""
-                          className="w-full max-h-48 object-cover rounded-lg"
-                        />
-                      )}
-                      {pub.generatedContent && (
-                        <p className="text-sm text-gray-600 bg-gray-50 rounded p-3 border border-gray-100 line-clamp-4">
-                          {pub.generatedContent}
-                        </p>
-                      )}
-
-                      {pub.llmTraceId && (
+                      {publication.llmTrace?.id && (
                         <Link
-                          to={`/llm-traces/${pub.llmTraceId}`}
-                          className="text-xs text-blue-500 hover:underline mt-2 inline-block"
-                          onClick={(e) => e.stopPropagation()}
+                          to={`/llm-traces/${publication.llmTrace.id}`}
+                          className="mt-2 inline-block text-xs text-primary hover:underline"
+                          onClick={(event) => event.stopPropagation()}
                         >
-                          LLM трейс →
+                          Открыть LLM-трейс →
                         </Link>
                       )}
                     </div>
-                  </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
         </div>
-      );
-    }}
-    </TeamScopeGuard>
-  );
+
+        <div className="space-y-6">
+          <div className="rounded-lg border border-border bg-card p-5">
+            <div className="mb-3 flex items-center gap-2">
+              <Megaphone className="size-4 text-muted-foreground" />
+              <h2 className="text-sm uppercase tracking-wide text-muted-foreground">Ручная публикация</h2>
+            </div>
+
+            {publishTargets.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Для этого материала нет подходящих каналов. Канал должен быть привязан к источнику.</p>
+            ) : (
+              <div className="space-y-3">
+                {publishTargets.map((target) => {
+                  const isBusy = publishProgress?.channelId === target.id
+                  const isDisabled = !target.isActive || !target.botCanPost || target.alreadyPublished || Boolean(isBusy)
+
+                  return (
+                      <div key={target.id} className="rounded-lg border border-border p-3">
+                      <div className="space-y-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Link to={`/channels/${target.id}`} className="text-sm font-medium text-gray-900 hover:text-blue-600">
+                              {target.name}
+                            </Link>
+                            <Badge
+                              variant={target.publishMode === 'scheduled' ? 'secondary' : target.publishMode === 'every_material' ? 'outline' : 'default'}
+                              className="text-[10px]"
+                            >
+                              {getChannelPublishModeLabel(target.publishMode)}
+                            </Badge>
+                          </div>
+                          <div className="mt-1 text-xs text-gray-500">
+                            {getChannelDisplayLabel(target)} · ID: {getChannelTechnicalId(target)}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                            {target.alreadyPublished ? (
+                              <Badge variant="secondary">Уже опубликовано</Badge>
+                            ) : target.isActive ? (
+                              <span className="inline-flex items-center gap-1 text-green-600">
+                                <PlayCircle className="size-3.5" />
+                                Активен
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 text-gray-500">
+                                <PauseCircle className="size-3.5" />
+                                Выключен
+                              </span>
+                            )}
+                            {!target.botCanPost && <Badge variant="destructive">Бот не может писать</Badge>}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Button size="sm" disabled={isDisabled || isPublishing} onClick={() => handlePublish(target.id)} className="w-full">
+                            {isBusy ? <Loader2 className="mr-2 size-4 animate-spin" /> : <Send className="mr-2 size-4" />}
+                            {isBusy ? 'Публикуем...' : 'Опубликовать'}
+                          </Button>
+                          {isBusy ? (
+                            <div className="text-center text-xs text-gray-500">
+                              {publishProgress?.stageText ?? 'Публикуем пост...'}
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 }

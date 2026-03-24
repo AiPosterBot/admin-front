@@ -1,401 +1,323 @@
-import { useState, useMemo } from "react";
-import {
-  Megaphone,
-  ArrowRight,
-  ArrowLeft,
-  CheckCircle,
-  Calendar,
-  Image as ImageIcon,
-  User,
-  FileText,
-  Info,
-} from "lucide-react";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "./ui/dialog";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { Label } from "./ui/label";
-import { Checkbox } from "./ui/checkbox";
-import { Badge } from "./ui/badge";
-import { toast } from "sonner";
-import {
-  mockAdsPosts,
-  createCampaign,
-  type AdsCampaign,
-} from "../data/mock-data";
-import { useTeam } from "../context/TeamContext";
-import { TagFilter } from "./TagFilter";
-import { TagBadge } from "./TagBadge";
-import * as channelService from "../services/channelService";
-import * as teamService from "../services/teamService";
+import { useMemo, useState } from 'react'
+import { ArrowLeft, ArrowRight, Calendar, CheckCircle, FileText, Image as ImageIcon, Megaphone, User } from 'lucide-react'
+import { toast } from 'sonner'
 
-type Step = "name" | "post" | "channels" | "schedule";
+import { TagBadge } from './TagBadge'
+import { TagFilter } from './TagFilter'
+import { Badge } from './ui/badge'
+import { Button } from './ui/button'
+import { Checkbox } from './ui/checkbox'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
+import { Input } from './ui/input'
+import { Label } from './ui/label'
+import type { AdsCampaign, AdsPost, Channel, ChannelTag } from '../types/domain'
+import * as channelService from '../services/channelService'
 
-const STEPS: Step[] = ["name", "post", "channels", "schedule"];
+type Step = 'name' | 'post' | 'channels' | 'schedule'
+
+const STEPS: Step[] = ['name', 'post', 'channels', 'schedule']
 const STEP_LABELS: Record<Step, string> = {
-  name: "Название",
-  post: "Пост",
-  channels: "Каналы",
-  schedule: "Расписание",
-};
+  name: 'Название',
+  post: 'Пост',
+  channels: 'Каналы',
+  schedule: 'Расписание',
+}
 
-const POSTS_PER_PAGE = 4;
-const CHANNELS_PER_PAGE = 8;
+const POSTS_PER_PAGE = 4
+const CHANNELS_PER_PAGE = 8
 
 interface AddCampaignDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onCreated: (campaign: AdsCampaign) => void;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  posts: AdsPost[]
+  channels: Channel[]
+  channelTags: ChannelTag[]
+  onCreated: (campaign: AdsCampaign) => void
+  onCreateCampaign: (input: { name: string; adsPostId: string; targetChannels: string[]; scheduledAt?: string }) => Promise<AdsCampaign>
+}
+
+function toPlainText(value: string) {
+  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
 }
 
 export function AddCampaignDialog({
   open,
   onOpenChange,
+  posts,
+  channels,
+  channelTags,
   onCreated,
+  onCreateCampaign,
 }: AddCampaignDialogProps) {
-  const { currentTeamId } = useTeam();
+  const [step, setStep] = useState<Step>('name')
+  const [name, setName] = useState('')
+  const [selectedPostId, setSelectedPostId] = useState<string | null>(null)
+  const [selectedChannels, setSelectedChannels] = useState<string[]>([])
+  const [scheduleMode, setScheduleMode] = useState<'now' | 'scheduled'>('now')
+  const [scheduleDate, setScheduleDate] = useState('')
+  const [scheduleTime, setScheduleTime] = useState('10:00')
+  const [postPage, setPostPage] = useState(1)
+  const [channelPage, setChannelPage] = useState(1)
+  const [channelTagFilter, setChannelTagFilter] = useState<string[]>([])
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const [step, setStep] = useState<Step>("name");
-  const [name, setName] = useState("");
-  const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
-  const [selectedChannels, setSelectedChannels] = useState<string[]>([]);
-  const [scheduleMode, setScheduleMode] = useState<"now" | "scheduled">("now");
-  const [scheduleDate, setScheduleDate] = useState("");
-  const [scheduleTime, setScheduleTime] = useState("10:00");
+  const currentStepIndex = STEPS.indexOf(step)
 
-  // Pagination state
-  const [postPage, setPostPage] = useState(1);
-  const [channelPage, setChannelPage] = useState(1);
-  const [channelTagFilter, setChannelTagFilter] = useState<string[]>([]);
+  const sortedPosts = useMemo(
+    () => [...posts].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()),
+    [posts],
+  )
 
-  const teamPosts = useMemo(
-    () =>
-      mockAdsPosts
-        .filter((p) => p.teamId === currentTeamId)
-        .sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        ),
-    [currentTeamId]
-  );
-
-  const teamChannels = useMemo(
-    () => channelService.getTeamChannelsList(currentTeamId ?? "").filter(c => c.isActive && c.botCanPost),
-    [currentTeamId]
-  );
-
-  const teamChannelTags = useMemo(
-    () => channelService.getTeamChannelTags(currentTeamId ?? ""),
-    [currentTeamId]
-  );
+  const activeChannels = useMemo(
+    () => channels.filter((channel) => channel.isActive && channel.botCanPost),
+    [channels],
+  )
 
   const filteredChannels = useMemo(() => {
-    if (channelTagFilter.length === 0) return teamChannels;
-    return teamChannels.filter(c => {
-      const tags = channelService.getChannelTagsById(c.id);
-      return tags.some(t => channelTagFilter.includes(t.id));
-    });
-  }, [teamChannels, channelTagFilter]);
-
-  // Post pagination
-  const totalPostPages = Math.max(1, Math.ceil(teamPosts.length / POSTS_PER_PAGE));
-  const paginatedPosts = teamPosts.slice(
-    (postPage - 1) * POSTS_PER_PAGE,
-    postPage * POSTS_PER_PAGE
-  );
-
-  // Channel pagination
-  const totalChannelPages = Math.max(
-    1,
-    Math.ceil(filteredChannels.length / CHANNELS_PER_PAGE)
-  );
-  const paginatedChannels = filteredChannels.slice(
-    (channelPage - 1) * CHANNELS_PER_PAGE,
-    channelPage * CHANNELS_PER_PAGE
-  );
-
-  const currentStepIndex = STEPS.indexOf(step);
-  const selectedPost = teamPosts.find((p) => p.id === selectedPostId);
-
-  const handleReset = () => {
-    setStep("name");
-    setName("");
-    setSelectedPostId(null);
-    setSelectedChannels([]);
-    setScheduleMode("now");
-    setScheduleDate("");
-    setScheduleTime("10:00");
-    setPostPage(1);
-    setChannelPage(1);
-    setChannelTagFilter([]);
-  };
-
-  const handleClose = () => {
-    onOpenChange(false);
-    setTimeout(handleReset, 300);
-  };
-
-  const toggleChannel = (channelId: string) => {
-    setSelectedChannels((prev) =>
-      prev.includes(channelId)
-        ? prev.filter((id) => id !== channelId)
-        : [...prev, channelId]
-    );
-  };
-
-  const toggleAll = () => {
-    if (selectedChannels.length === filteredChannels.length) {
-      setSelectedChannels([]);
-    } else {
-      setSelectedChannels(filteredChannels.map((c) => c.id));
+    if (channelTagFilter.length === 0) {
+      return activeChannels
     }
-  };
 
-  const handleNext = () => {
-    const idx = currentStepIndex;
-    if (idx < STEPS.length - 1) {
-      setStep(STEPS[idx + 1]);
-    }
-  };
+    return activeChannels.filter((channel) => {
+      const tags = channelService.getChannelTagsById(channel.id)
+      return tags.some((tag) => channelTagFilter.includes(tag.id))
+    })
+  }, [activeChannels, channelTagFilter])
 
-  const handleBack = () => {
-    const idx = currentStepIndex;
-    if (idx > 0) {
-      setStep(STEPS[idx - 1]);
+  const totalPostPages = Math.max(1, Math.ceil(sortedPosts.length / POSTS_PER_PAGE))
+  const paginatedPosts = sortedPosts.slice((postPage - 1) * POSTS_PER_PAGE, postPage * POSTS_PER_PAGE)
+
+  const totalChannelPages = Math.max(1, Math.ceil(filteredChannels.length / CHANNELS_PER_PAGE))
+  const paginatedChannels = filteredChannels.slice((channelPage - 1) * CHANNELS_PER_PAGE, channelPage * CHANNELS_PER_PAGE)
+
+  const selectedPost = sortedPosts.find((post) => post.id === selectedPostId) ?? null
+
+  const reset = () => {
+    setStep('name')
+    setName('')
+    setSelectedPostId(null)
+    setSelectedChannels([])
+    setScheduleMode('now')
+    setScheduleDate('')
+    setScheduleTime('10:00')
+    setPostPage(1)
+    setChannelPage(1)
+    setChannelTagFilter([])
+    setIsSubmitting(false)
+  }
+
+  const handleOpenChange = (nextOpen: boolean) => {
+    onOpenChange(nextOpen)
+    if (!nextOpen) {
+      window.setTimeout(reset, 150)
     }
-  };
+  }
 
   const canGoNext = () => {
     switch (step) {
-      case "name":
-        return name.trim().length > 0;
-      case "post":
-        return selectedPostId !== null;
-      case "channels":
-        return selectedChannels.length > 0;
-      case "schedule":
-        return scheduleMode === "now" || (scheduleDate && scheduleTime);
+      case 'name':
+        return name.trim().length > 0
+      case 'post':
+        return Boolean(selectedPostId)
+      case 'channels':
+        return selectedChannels.length > 0
+      case 'schedule':
+        return scheduleMode === 'now' || Boolean(scheduleDate && scheduleTime)
       default:
-        return false;
+        return false
     }
-  };
+  }
 
-  const handleCreate = () => {
-    if (!selectedPostId) return;
-
-    let scheduledAt: string | undefined;
-    if (scheduleMode === "scheduled" && scheduleDate && scheduleTime) {
-      scheduledAt = new Date(
-        `${scheduleDate}T${scheduleTime}:00`
-      ).toISOString();
+  const handleCreate = async () => {
+    if (!selectedPostId || isSubmitting) {
+      return
     }
 
-    const campaign = createCampaign({
-      name: name.trim(),
-      adsPostId: selectedPostId,
-      targetChannels: selectedChannels,
-      scheduledAt,
-    });
+    try {
+      setIsSubmitting(true)
+      const scheduledAt =
+        scheduleMode === 'scheduled' && scheduleDate && scheduleTime
+          ? new Date(`${scheduleDate}T${scheduleTime}:00`).toISOString()
+          : undefined
 
-    toast.success(`Кампания «${campaign.name}» создана`);
-    onCreated(campaign);
-    handleClose();
-  };
+      const campaign = await onCreateCampaign({
+        name: name.trim(),
+        adsPostId: selectedPostId,
+        targetChannels: selectedChannels,
+        scheduledAt,
+      })
 
-  /** Helper to get tg link for channel */
-  const channelTgLink = (telegramId: string) => {
-    const username = telegramId.replace("@", "");
-    return `https://t.me/${username}`;
-  };
+      toast.success(`Кампания «${campaign.name}» создана`)
+      onCreated(campaign)
+      handleOpenChange(false)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось создать кампанию')
+      setIsSubmitting(false)
+    }
+  }
+
+  const toggleChannel = (channelId: string) => {
+    setSelectedChannels((current) =>
+      current.includes(channelId) ? current.filter((id) => id !== channelId) : [...current, channelId],
+    )
+  }
+
+  const toggleAllChannels = () => {
+    const filteredIds = filteredChannels.map((channel) => channel.id)
+    const allSelected = filteredIds.every((channelId) => selectedChannels.includes(channelId))
+    if (allSelected) {
+      setSelectedChannels((current) => current.filter((channelId) => !filteredIds.includes(channelId)))
+      return
+    }
+
+    setSelectedChannels((current) => Array.from(new Set([...current, ...filteredIds])))
+  }
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-[580px]">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Megaphone className="size-5 text-blue-600" />
-            {step === "name" && "Новая кампания"}
-            {step === "post" && "Выбор поста"}
-            {step === "channels" && "Выбор каналов"}
-            {step === "schedule" && "Расписание отправки"}
+            {step === 'name' && 'Новая кампания'}
+            {step === 'post' && 'Выбор поста'}
+            {step === 'channels' && 'Выбор каналов'}
+            {step === 'schedule' && 'Расписание отправки'}
           </DialogTitle>
           <DialogDescription>
-            {step === "name" && "Введите название рекламной кампании"}
-            {step === "post" && "Выберите рекламный пост для рассылки"}
-            {step === "channels" && "Выберите каналы для рассылки"}
-            {step === "schedule" &&
-              "Время устанавливается исходя из часового пояса вашего профиля"}
+            {step === 'name' && 'Введите внутреннее название рекламной кампании'}
+            {step === 'post' && 'Выберите рекламный пост, который нужно отправить'}
+            {step === 'channels' && 'Выберите каналы, куда пойдёт кампания'}
+            {step === 'schedule' && 'Можно отправить сразу или запланировать на конкретное время'}
           </DialogDescription>
         </DialogHeader>
 
-        {/* Step indicators */}
-        <div className="flex items-center gap-2 mb-2">
-          {STEPS.map((s, idx) => (
-            <div key={s} className="flex items-center gap-2">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          {STEPS.map((item, index) => (
+            <div key={item} className="flex items-center gap-2">
               <div
-                className={`size-6 rounded-full flex items-center justify-center text-xs font-bold transition-colors ${
-                  step === s
-                    ? "bg-blue-600 text-white"
-                    : idx < currentStepIndex
-                    ? "bg-green-500 text-white"
-                    : "bg-gray-100 text-gray-400"
+                className={`flex size-6 items-center justify-center rounded-full text-xs font-bold ${
+                  item === step
+                    ? 'bg-primary text-primary-foreground'
+                    : index < currentStepIndex
+                      ? 'bg-green-500 text-white'
+                      : 'bg-muted text-muted-foreground'
                 }`}
               >
-                {idx < currentStepIndex ? (
-                  <CheckCircle className="size-3.5" />
-                ) : (
-                  idx + 1
-                )}
+                {index < currentStepIndex ? <CheckCircle className="size-3.5" /> : index + 1}
               </div>
-              {idx < STEPS.length - 1 && (
-                <div
-                  className={`h-0.5 w-5 transition-colors ${
-                    idx < currentStepIndex ? "bg-green-500" : "bg-gray-200"
-                  }`}
-                />
+              {index < STEPS.length - 1 && (
+                <div className={`h-0.5 w-5 ${index < currentStepIndex ? 'bg-green-500' : 'bg-border'}`} />
               )}
             </div>
           ))}
-          <span className="text-xs text-gray-400 ml-2">
-            {STEP_LABELS[step]}
-          </span>
+          <span className="ml-2 text-xs text-muted-foreground">{STEP_LABELS[step]}</span>
         </div>
 
-        {/* Step 1: Name */}
-        {step === "name" && (
+        {step === 'name' && (
           <div className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="campaign-name" className="mb-2 block">
-                Название кампании
-              </Label>
+              <Label htmlFor="campaign-name">Название кампании</Label>
               <Input
                 id="campaign-name"
-                placeholder="Например: Весенняя акция"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && canGoNext()) handleNext();
-                }}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="Например: Весенний запуск"
                 autoFocus
               />
-              <p className="text-xs text-gray-400">
-                Название будет видно только вам — используйте понятное описание
-              </p>
+              <p className="text-xs text-muted-foreground">Это название видно только внутри админки.</p>
             </div>
+
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={handleClose}>
+              <Button variant="outline" onClick={() => handleOpenChange(false)}>
                 Отмена
               </Button>
-              <Button onClick={handleNext} disabled={!canGoNext()}>
-                Далее <ArrowRight className="size-4 ml-1.5" />
+              <Button onClick={() => setStep('post')} disabled={!canGoNext()}>
+                Далее <ArrowRight className="ml-1.5 size-4" />
               </Button>
             </div>
           </div>
         )}
 
-        {/* Step 2: Select post */}
-        {step === "post" && (
+        {step === 'post' && (
           <div className="space-y-4">
-            {teamPosts.length === 0 ? (
-              <div className="text-center py-8 text-gray-500">
-                <FileText className="size-8 text-gray-300 mx-auto mb-2" />
-                <div className="font-medium">Нет доступных постов</div>
-                <p className="text-sm mt-1">
-                  Сначала создайте рекламный пост: отправьте сообщение боту и
-                  ответьте на него командой{" "}
-                  <code className="bg-gray-100 px-1 rounded">/ads</code>
-                </p>
+            {sortedPosts.length === 0 ? (
+              <div className="py-8 text-center text-muted-foreground">
+                <FileText className="mx-auto mb-2 size-8 text-muted-foreground/50" />
+                <div className="font-medium">Нет доступных рекламных постов</div>
+                <p className="mt-1 text-sm">Сначала сохраните пост через Telegram-бота командой `/ads`.</p>
               </div>
             ) : (
               <>
-                <div className="max-h-[320px] overflow-y-auto border rounded-lg divide-y">
+                <div className="max-h-[320px] overflow-y-auto rounded-lg border border-border divide-y divide-border">
                   {paginatedPosts.map((post) => {
-                    const isSelected = selectedPostId === post.id;
+                    const preview = toPlainText(post.text)
+                    const isSelected = selectedPostId === post.id
                     return (
                       <label
                         key={post.id}
-                        className={`flex gap-3 p-3 cursor-pointer transition-colors ${
-                          isSelected ? "bg-blue-50" : "hover:bg-gray-50"
-                        }`}
+                        className={`flex cursor-pointer gap-3 p-3 transition-colors ${isSelected ? 'bg-primary/10' : 'hover:bg-muted/60'}`}
                       >
                         <input
                           type="radio"
                           name="ads-post"
                           checked={isSelected}
                           onChange={() => setSelectedPostId(post.id)}
-                          className="accent-blue-600 mt-1 flex-shrink-0"
+                          className="mt-1 shrink-0 accent-blue-600"
                         />
                         {post.mediaUrl && (
-                          <img
-                            src={post.mediaUrl}
-                            alt=""
-                            className="w-14 h-14 object-cover rounded flex-shrink-0"
-                          />
+                          <img src={post.mediaUrl} alt="" className="h-14 w-14 shrink-0 rounded object-cover" />
                         )}
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-gray-800 line-clamp-2">
-                            {post.text}
-                          </p>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="flex items-center gap-1 text-xs text-gray-400">
+                        <div className="min-w-0 flex-1">
+                          <p className="line-clamp-2 text-sm text-foreground">{preview || 'Медиа без текста'}</p>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <span className="flex items-center gap-1 text-xs text-muted-foreground">
                               <User className="size-3" />
                               {post.createdByName}
                             </span>
-                            <span className="text-xs text-gray-400">
-                              {new Date(post.createdAt).toLocaleDateString(
-                                "ru-RU",
-                                {
-                                  day: "numeric",
-                                  month: "short",
-                                }
-                              )}
+                            <span className="text-xs text-muted-foreground">
+                              {new Date(post.createdAt).toLocaleDateString('ru-RU', {
+                                day: 'numeric',
+                                month: 'short',
+                              })}
                             </span>
                             {post.mediaUrl && (
-                              <span className="flex items-center gap-1 text-xs text-gray-400">
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground">
                                 <ImageIcon className="size-3" />
+                                Медиа
                               </span>
                             )}
                             {post.usedInCampaigns.length > 0 && (
-                              <Badge
-                                variant="secondary"
-                                className="text-xs py-0"
-                              >
-                                {post.usedInCampaigns.length} кампан.
+                              <Badge variant="secondary" className="py-0 text-xs">
+                                {post.usedInCampaigns.length} камп.
                               </Badge>
                             )}
                           </div>
                         </div>
                       </label>
-                    );
+                    )
                   })}
                 </div>
 
-                {/* Post pagination */}
                 {totalPostPages > 1 && (
-                  <div className="flex items-center justify-between text-xs text-gray-400">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>
-                      {teamPosts.length} постов · стр. {postPage} из{" "}
-                      {totalPostPages}
+                      {sortedPosts.length} постов · стр. {postPage} из {totalPostPages}
                     </span>
                     <div className="flex gap-1">
                       <button
-                        onClick={() => setPostPage((p) => Math.max(1, p - 1))}
+                        type="button"
+                        onClick={() => setPostPage((current) => Math.max(1, current - 1))}
                         disabled={postPage === 1}
-                        className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30"
+                        className="rounded px-2 py-1 hover:bg-muted disabled:opacity-30"
                       >
                         &larr;
                       </button>
                       <button
-                        onClick={() =>
-                          setPostPage((p) => Math.min(totalPostPages, p + 1))
-                        }
+                        type="button"
+                        onClick={() => setPostPage((current) => Math.min(totalPostPages, current + 1))}
                         disabled={postPage === totalPostPages}
-                        className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30"
+                        className="rounded px-2 py-1 hover:bg-muted disabled:opacity-30"
                       >
                         &rarr;
                       </button>
@@ -405,131 +327,98 @@ export function AddCampaignDialog({
               </>
             )}
 
-            <div className="flex items-center justify-between gap-2">
-              <Button variant="ghost" onClick={handleBack}>
-                <ArrowLeft className="size-4 mr-1.5" />
+            <div className="flex items-center justify-between">
+              <Button variant="ghost" onClick={() => setStep('name')}>
+                <ArrowLeft className="mr-1.5 size-4" />
                 Назад
               </Button>
-              <Button onClick={handleNext} disabled={!canGoNext()}>
-                Далее <ArrowRight className="size-4 ml-1.5" />
+              <Button onClick={() => setStep('channels')} disabled={!canGoNext()}>
+                Далее <ArrowRight className="ml-1.5 size-4" />
               </Button>
             </div>
           </div>
         )}
 
-        {/* Step 3: Channels */}
-        {step === "channels" && (
+        {step === 'channels' && (
           <div className="space-y-4">
-            {teamChannels.length === 0 ? (
-              <div className="text-center py-6 text-gray-500">
-                <Megaphone className="size-8 text-gray-300 mx-auto mb-2" />
-                <div className="font-medium">Нет активных каналов</div>
-                <p className="text-sm mt-1">
-                  Сначала добавьте хотя бы один активный канал
-                </p>
+            {activeChannels.length === 0 ? (
+              <div className="py-8 text-center text-muted-foreground">
+                <Megaphone className="mx-auto mb-2 size-8 text-muted-foreground/50" />
+                <div className="font-medium">Нет доступных каналов</div>
+                <p className="mt-1 text-sm">Нужны активные каналы, куда бот может публиковать сообщения.</p>
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm text-gray-500">
-                      Выбрано: {selectedChannels.length} из{" "}
-                      {teamChannels.length}
-                    </span>
-                    {teamChannelTags.length > 0 && (
-                      <TagFilter
-                        tags={teamChannelTags}
-                        selectedTagIds={channelTagFilter}
-                        onChange={(ids) => { setChannelTagFilter(ids); setChannelPage(1); }}
-                      />
-                    )}
-                  </div>
-                  <button
-                    onClick={toggleAll}
-                    className="text-sm text-blue-600 hover:text-blue-700 transition-colors"
-                  >
-                    {selectedChannels.length === filteredChannels.length
-                      ? "Снять все"
-                      : "Выбрать все"}
-                  </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <TagFilter
+                    tags={channelTags}
+                    selectedTagIds={channelTagFilter}
+                    onChange={(tagIds) => {
+                      setChannelTagFilter(tagIds)
+                      setChannelPage(1)
+                    }}
+                    label="Теги каналов"
+                  />
+                  <Button type="button" variant="outline" size="sm" onClick={toggleAllChannels}>
+                    {filteredChannels.every((channel) => selectedChannels.includes(channel.id)) ? 'Снять все' : 'Выбрать все'}
+                  </Button>
                 </div>
 
-                <div className="max-h-[280px] overflow-y-auto border rounded-lg divide-y">
+                {channelTagFilter.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {channelTags
+                      .filter((tag) => channelTagFilter.includes(tag.id))
+                      .map((tag) => (
+                        <TagBadge
+                          key={tag.id}
+                          name={tag.name}
+                          color={tag.color}
+                          onRemove={() => setChannelTagFilter((current) => current.filter((id) => id !== tag.id))}
+                        />
+                      ))}
+                  </div>
+                )}
+
+                <div className="max-h-[320px] overflow-y-auto rounded-lg border border-border divide-y divide-border">
                   {paginatedChannels.map((channel) => {
-                    const isSelected = selectedChannels.includes(channel.id);
-                    const username = channel.telegramId.replace("@", "");
+                    const checked = selectedChannels.includes(channel.id)
+                    const tags = channelService.getChannelTagsById(channel.id)
                     return (
-                      <label
-                        key={channel.id}
-                        className={`flex items-center gap-3 px-3 py-2.5 cursor-pointer transition-colors ${
-                          isSelected ? "bg-blue-50" : "hover:bg-gray-50"
-                        }`}
-                      >
-                        <Checkbox
-                          checked={isSelected}
-                          onCheckedChange={() => toggleChannel(channel.id)}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-gray-900">
-                            {channel.name}
+                      <label key={channel.id} className="flex cursor-pointer items-start gap-3 p-3 transition-colors hover:bg-muted/60">
+                        <Checkbox checked={checked} onCheckedChange={() => toggleChannel(channel.id)} className="mt-1" />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-foreground">{channel.name}</div>
+                          <div className="mt-0.5 text-xs text-muted-foreground">{channelService.getChannelDisplayLabel(channel)}</div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {tags.map((tag) => (
+                              <TagBadge key={tag.id} name={tag.name} color={tag.color} />
+                            ))}
                           </div>
-                          <a
-                            href={channelTgLink(channel.telegramId)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-xs text-blue-500 hover:text-blue-600"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            {channel.telegramId}
-                          </a>
-                          {(() => {
-                            const tags = channelService.getChannelTagsById(channel.id);
-                            return tags.length > 0 ? (
-                              <div className="flex items-center gap-1 mt-0.5 flex-wrap">
-                                {tags.map(t => (
-                                  <TagBadge key={t.id} name={t.name} color={t.color} />
-                                ))}
-                              </div>
-                            ) : null;
-                          })()}
                         </div>
-                        <div
-                          className={`size-2 rounded-full flex-shrink-0 ${
-                            channel.lastError
-                              ? "bg-red-500"
-                              : "bg-green-500"
-                          }`}
-                        />
                       </label>
-                    );
+                    )
                   })}
                 </div>
 
-                {/* Channel pagination */}
                 {totalChannelPages > 1 && (
-                  <div className="flex items-center justify-between text-xs text-gray-400">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span>
-                      {filteredChannels.length} каналов · стр. {channelPage} из{" "}
-                      {totalChannelPages}
+                      {filteredChannels.length} каналов · стр. {channelPage} из {totalChannelPages}
                     </span>
                     <div className="flex gap-1">
                       <button
-                        onClick={() =>
-                          setChannelPage((p) => Math.max(1, p - 1))
-                        }
+                        type="button"
+                        onClick={() => setChannelPage((current) => Math.max(1, current - 1))}
                         disabled={channelPage === 1}
-                        className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30"
+                        className="rounded px-2 py-1 hover:bg-muted disabled:opacity-30"
                       >
                         &larr;
                       </button>
                       <button
-                        onClick={() =>
-                          setChannelPage((p) =>
-                            Math.min(totalChannelPages, p + 1)
-                          )
-                        }
+                        type="button"
+                        onClick={() => setChannelPage((current) => Math.min(totalChannelPages, current + 1))}
                         disabled={channelPage === totalChannelPages}
-                        className="px-2 py-1 rounded hover:bg-gray-100 disabled:opacity-30"
+                        className="rounded px-2 py-1 hover:bg-muted disabled:opacity-30"
                       >
                         &rarr;
                       </button>
@@ -539,142 +428,93 @@ export function AddCampaignDialog({
               </>
             )}
 
-            <div className="flex items-center justify-between gap-2">
-              <Button variant="ghost" onClick={handleBack}>
-                <ArrowLeft className="size-4 mr-1.5" />
+            <div className="flex items-center justify-between">
+              <Button variant="ghost" onClick={() => setStep('post')}>
+                <ArrowLeft className="mr-1.5 size-4" />
                 Назад
               </Button>
-              <Button onClick={handleNext} disabled={!canGoNext()}>
-                Далее <ArrowRight className="size-4 ml-1.5" />
+              <Button onClick={() => setStep('schedule')} disabled={!canGoNext()}>
+                Далее <ArrowRight className="ml-1.5 size-4" />
               </Button>
             </div>
           </div>
         )}
 
-        {/* Step 4: Schedule + confirm */}
-        {step === "schedule" && (
+        {step === 'schedule' && (
           <div className="space-y-4">
-            {/* Summary */}
-            <div className="bg-gray-50 border rounded-lg p-3 space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Кампания</span>
-                <span className="font-medium text-gray-900">{name}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Пост</span>
-                <span className="font-medium text-gray-900 truncate max-w-[250px] text-right">
-                  {selectedPost?.text.split("\n")[0].slice(0, 40)}
-                  {(selectedPost?.text.split("\n")[0].length || 0) > 40
-                    ? "..."
-                    : ""}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Каналов</span>
-                <span className="font-medium text-gray-900">
-                  {selectedChannels.length}
-                </span>
+            <div className="rounded-lg border border-border bg-card p-4">
+              <div className="text-sm font-medium text-foreground">Сводка</div>
+              <div className="mt-3 space-y-2 text-sm text-muted-foreground">
+                <div>
+                  <span className="text-muted-foreground">Название:</span> {name}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Пост:</span> {selectedPost ? toPlainText(selectedPost.text) || 'Медиа без текста' : 'Не выбран'}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Каналы:</span> {selectedChannels.length}
+                </div>
               </div>
             </div>
 
             <div className="space-y-3">
-              <label
-                className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${
-                  scheduleMode === "now"
-                    ? "border-blue-300 bg-blue-50"
-                    : "hover:bg-gray-50"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="schedule"
-                  checked={scheduleMode === "now"}
-                  onChange={() => setScheduleMode("now")}
-                  className="accent-blue-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-900">
-                    Отправить сразу
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    Рассылка начнётся немедленно после создания кампании
-                  </div>
-                </div>
-              </label>
-
-              <label
-                className={`flex items-center gap-3 p-3 border rounded-lg cursor-pointer transition-colors ${
-                  scheduleMode === "scheduled"
-                    ? "border-blue-300 bg-blue-50"
-                    : "hover:bg-gray-50"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="schedule"
-                  checked={scheduleMode === "scheduled"}
-                  onChange={() => setScheduleMode("scheduled")}
-                  className="accent-blue-600"
-                />
-                <div>
-                  <div className="text-sm font-medium text-gray-900">
-                    Запланировать
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    Укажите дату и время отправки
-                  </div>
-                </div>
-              </label>
+              <Label>Когда отправлять</Label>
+              <div className="grid gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('now')}
+                  className={`rounded-lg border border-border p-3 text-left transition-colors ${
+                    scheduleMode === 'now' ? 'border-primary/50 bg-primary/10' : 'hover:bg-muted/60'
+                  }`}
+                >
+                  <div className="font-medium text-foreground">Сразу после создания</div>
+                  <div className="text-sm text-muted-foreground">Кампания уйдёт в очередь немедленно.</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('scheduled')}
+                  className={`rounded-lg border border-border p-3 text-left transition-colors ${
+                    scheduleMode === 'scheduled' ? 'border-primary/50 bg-primary/10' : 'hover:bg-muted/60'
+                  }`}
+                >
+                  <div className="font-medium text-foreground">Запланировать</div>
+                  <div className="text-sm text-muted-foreground">Укажите дату и время запуска кампании.</div>
+                </button>
+              </div>
             </div>
 
-            {scheduleMode === "scheduled" && (
-              <div className="flex gap-3 pl-9">
-                <div className="flex-1 space-y-1.5">
-                  <Label htmlFor="sched-date" className="text-xs">
-                    Дата
-                  </Label>
-                  <Input
-                    id="sched-date"
-                    type="date"
-                    value={scheduleDate}
-                    onChange={(e) => setScheduleDate(e.target.value)}
-                    min={new Date().toISOString().split("T")[0]}
-                  />
+            {scheduleMode === 'scheduled' && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="ads-schedule-date">Дата</Label>
+                  <Input id="ads-schedule-date" type="date" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} />
                 </div>
-                <div className="w-28 space-y-1.5">
-                  <Label htmlFor="sched-time" className="text-xs">
-                    Время
-                  </Label>
-                  <Input
-                    id="sched-time"
-                    type="time"
-                    value={scheduleTime}
-                    onChange={(e) => setScheduleTime(e.target.value)}
-                  />
+                <div className="space-y-2">
+                  <Label htmlFor="ads-schedule-time">Время</Label>
+                  <Input id="ads-schedule-time" type="time" value={scheduleTime} onChange={(event) => setScheduleTime(event.target.value)} />
                 </div>
               </div>
             )}
 
-            {scheduleMode === "scheduled" && (
-              <div className="flex items-center gap-1.5 text-xs text-gray-400 pl-9">
-                <Info className="size-3" />
-                Время устанавливается в часовом поясе вашего профиля
+            <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-200">
+              <div className="flex items-start gap-2">
+                <Calendar className="mt-0.5 size-4 shrink-0" />
+                <span>Время трактуется в часовом поясе, который указан в вашем профиле.</span>
               </div>
-            )}
+            </div>
 
-            <div className="flex items-center justify-between gap-2">
-              <Button variant="ghost" onClick={handleBack}>
-                <ArrowLeft className="size-4 mr-1.5" />
+            <div className="flex items-center justify-between">
+              <Button variant="ghost" onClick={() => setStep('channels')}>
+                <ArrowLeft className="mr-1.5 size-4" />
                 Назад
               </Button>
-              <Button onClick={handleCreate} disabled={!canGoNext()}>
-                <Megaphone className="size-4 mr-2" />
-                Создать кампанию
+              <Button onClick={() => void handleCreate()} disabled={!canGoNext() || isSubmitting}>
+                {isSubmitting ? 'Создание...' : 'Создать кампанию'}
               </Button>
             </div>
           </div>
         )}
       </DialogContent>
     </Dialog>
-  );
+  )
 }

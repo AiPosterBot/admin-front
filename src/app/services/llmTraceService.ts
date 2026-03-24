@@ -1,53 +1,198 @@
-// ══════════════════════════════════════════════════════════════════════
-//  LLM Trace Service — единственная точка доступа к данным LLM-трейсов.
-// ══════════════════════════════════════════════════════════════════════
+import { apiGet } from '../lib/api'
 
-import { mockLLMTraces, mockJobs, type LLMTrace } from '../data/mock-data';
-
-// ── Queries ───────────────────────────────────────────────────────────
-
-/** Все LLM-трейсы команды, отсортированные по дате (новые первыми) */
-export async function getTeamTraces(teamId: string): Promise<LLMTrace[]> {
-  return mockLLMTraces
-    .filter((t) => t.teamId === teamId)
-    .sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
+export interface LlmTraceSummary {
+  id: string
+  teamId: string
+  jobId?: string | null
+  operation: string
+  stage: string
+  model: string
+  totalTokens: number | null
+  costUsd: number | null
+  createdAt: string
 }
 
-/**
- * Трейс по id С проверкой принадлежности команде.
- * null — если не найден или teamId не совпадает.
- */
-export async function getTraceById(
-  traceId: string,
-  teamId: string,
-): Promise<LLMTrace | null> {
-  const trace = mockLLMTraces.find((t) => t.id === traceId);
-  if (!trace || trace.teamId !== teamId) return null;
-  return trace;
+export interface LlmTraceDetail extends LlmTraceSummary {
+  promptTokens: number | null
+  completionTokens: number | null
+  latencyMs: number | null
+  promptText: string | null
+  responseText: string | null
+  toolCalls: Array<Record<string, unknown>>
+  rawRequest: Record<string, unknown>
+  rawResponse: Record<string, unknown>
 }
 
-/** Джоб, породивший этот трейс (если есть) */
-export function getTraceJob(trace: LLMTrace) {
-  if (!trace.jobId) return null;
-  return mockJobs.find((j) => j.id === trace.jobId) ?? null;
+export interface LlmTraceJobSummary {
+  id: string
+  type: string
+  status: string
 }
 
-/** Совокупная стоимость трейсов команды (USD) */
-export function sumCost(traces: LLMTrace[]): number {
-  return traces.reduce((acc, t) => acc + t.cost, 0);
+interface ListLlmTracesResponse {
+  data: Array<{
+    id: string
+    teamId: string
+    jobId?: string | null
+    operation: string
+    stage: string
+    model: string
+    totalTokens: number | null
+    costUsd: number | null
+    createdAt: string
+  }>
+  page: number
+  limit: number
+  total: number
+  hasNext: boolean
 }
 
-/** Совокупные токены трейсов команды */
-export function sumTokens(traces: LLMTrace[]): number {
-  return traces.reduce((acc, t) => acc + t.totalTokens, 0);
+interface GetLlmTraceDetailResponse {
+  llmTrace: {
+    id: string
+    teamId: string
+    jobId?: string | null
+    operation: string
+    stage: string
+    model: string
+    promptTokens: number | null
+    completionTokens: number | null
+    totalTokens: number | null
+    costUsd: number | null
+    latencyMs: number | null
+    promptText: string | null
+    responseText: string | null
+    toolCalls: Array<Record<string, unknown>>
+    rawRequest: Record<string, unknown>
+    rawResponse: Record<string, unknown>
+    createdAt: string
+  }
+  job: LlmTraceJobSummary | null
 }
 
-/**
- * Синхронно вернуть трейсы по массиву id.
- * Используется в JobDetailPage вместо прямого доступа к mockLLMTraces.
- */
-export function getTracesByIds(ids: string[]): LLMTrace[] {
-  return mockLLMTraces.filter((t) => ids.includes(t.id));
+export interface TeamLlmTracesResult {
+  traces: LlmTraceSummary[]
+  total: number
+  hasNext: boolean
+  facets?: {
+    operationCounts: Record<'all' | 'onboard_website' | 'onboard_rss_article' | 'publish_to_channel' | 'channel_testing' | 'ads_campaign', number>
+  }
+  summary?: {
+    totalTokens: number
+    totalCostUsd: number
+  }
+}
+
+export interface LlmTraceWithRelations extends LlmTraceDetail {
+  job: LlmTraceJobSummary | null
+}
+
+export interface GetTeamTracesOptions {
+  page?: number
+  limit?: number
+  operation?: string
+  from?: string
+  to?: string
+}
+
+export function getLlmOperationLabel(operation: string) {
+  switch (operation) {
+    case 'onboard_website':
+      return 'Онбординг web-источника'
+    case 'onboard_rss_article':
+      return 'Онбординг RSS article-agent'
+    case 'publish_to_channel':
+      return 'Публикация в канал'
+    case 'channel_testing':
+      return 'Тестовая генерация канала'
+    case 'ads_campaign':
+      return 'Рекламная кампания'
+    default:
+      return operation.replace(/_/g, ' ')
+    }
+}
+
+export async function getTeamTraces(teamId: string, options: GetTeamTracesOptions = {}): Promise<TeamLlmTracesResult> {
+  const params = new URLSearchParams({
+    teamId,
+    page: String(options.page ?? 1),
+    limit: String(options.limit ?? 100),
+  })
+
+  if (options.operation) {
+    params.set('operation', options.operation)
+  }
+  if (options.from) {
+    params.set('from', options.from)
+  }
+  if (options.to) {
+    params.set('to', options.to)
+  }
+
+  const response = await apiGet<ListLlmTracesResponse & TeamLlmTracesResult>(`/api/llm/traces?${params.toString()}`)
+
+  return {
+    traces: response.data.map((trace) => ({
+      id: trace.id,
+      teamId: trace.teamId,
+      jobId: trace.jobId ?? null,
+      operation: trace.operation,
+      stage: trace.stage,
+      model: trace.model,
+      totalTokens: trace.totalTokens ?? null,
+      costUsd: trace.costUsd === null ? null : Number(trace.costUsd),
+      createdAt: trace.createdAt,
+    })),
+    total: response.total,
+    hasNext: response.hasNext,
+    facets: response.facets,
+    summary: response.summary,
+  }
+}
+
+export function getLlmTraceStageLabel(stage: string) {
+  switch (stage) {
+    case 'candidate_selection':
+      return 'Выбор материала'
+    case 'post_generation':
+      return 'Генерация поста'
+    default:
+      return 'Основной вызов'
+  }
+}
+
+export async function getTraceById(traceId: string, teamId: string): Promise<LlmTraceWithRelations | null> {
+  const response = await apiGet<GetLlmTraceDetailResponse>(`/api/llm/traces/${traceId}`)
+  if (response.llmTrace.teamId !== teamId) {
+    return null
+  }
+
+  return {
+    id: response.llmTrace.id,
+    teamId: response.llmTrace.teamId,
+    jobId: response.llmTrace.jobId ?? null,
+    operation: response.llmTrace.operation,
+    stage: response.llmTrace.stage,
+    model: response.llmTrace.model,
+    promptTokens: response.llmTrace.promptTokens ?? null,
+    completionTokens: response.llmTrace.completionTokens ?? null,
+    totalTokens: response.llmTrace.totalTokens ?? null,
+    costUsd: response.llmTrace.costUsd === null ? null : Number(response.llmTrace.costUsd),
+    latencyMs: response.llmTrace.latencyMs ?? null,
+    promptText: response.llmTrace.promptText ?? null,
+    responseText: response.llmTrace.responseText ?? null,
+    toolCalls: response.llmTrace.toolCalls ?? [],
+    rawRequest: response.llmTrace.rawRequest ?? {},
+    rawResponse: response.llmTrace.rawResponse ?? {},
+    createdAt: response.llmTrace.createdAt,
+    job: response.job,
+  }
+}
+
+export function sumCost(traces: LlmTraceSummary[]) {
+  return traces.reduce((acc, trace) => acc + (trace.costUsd ?? 0), 0)
+}
+
+export function sumTokens(traces: LlmTraceSummary[]) {
+  return traces.reduce((acc, trace) => acc + (trace.totalTokens ?? 0), 0)
 }

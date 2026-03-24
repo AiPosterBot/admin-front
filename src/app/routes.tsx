@@ -25,7 +25,10 @@ import { AdminDashboardPage } from "./pages/AdminDashboardPage";
 import { AdminUsersPage } from "./pages/AdminUsersPage";
 import { UserDetailPage } from "./pages/UserDetailPage";
 import { AdminTeamsPage } from "./pages/AdminTeamsPage";
+import { AdminSchedulerSettingsPage } from "./pages/AdminSchedulerSettingsPage";
 import { AdminLLMAnalyticsPage } from "./pages/AdminLLMAnalyticsPage";
+import { AdminLLMTracesPage } from "./pages/AdminLLMTracesPage";
+import { AdminJobDetailPage } from "./pages/AdminJobDetailPage";
 import { AdminAdminsPage } from "./pages/AdminAdminsPage";
 import { AdminInvitesPage } from "./pages/AdminInvitesPage";
 import { AdsCampaignsPage } from "./pages/AdsCampaignsPage";
@@ -88,12 +91,24 @@ export const router = createBrowserRouter([
         Component: AdminTeamsPage,
       },
       {
+        path: "scheduler-settings",
+        Component: AdminSchedulerSettingsPage,
+      },
+      {
         path: "admins",
         Component: AdminAdminsPage,
       },
       {
         path: "llm-analytics",
         Component: AdminLLMAnalyticsPage,
+      },
+      {
+        path: "llm-traces",
+        Component: AdminLLMTracesPage,
+      },
+      {
+        path: "jobs/:jobId",
+        Component: AdminJobDetailPage,
       },
       {
         path: "llm-traces/:traceId",

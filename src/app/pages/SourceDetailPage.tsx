@@ -1,18 +1,21 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams, useNavigate } from "react-router";
 import {
   RefreshCw, Power, AlertCircle, ArrowLeft, ExternalLink,
   CheckCircle, FileText, Newspaper, Activity,
-  Settings, Eye, Heart, ChevronRight, Clock, Filter,
+  Settings, Eye, Heart, ChevronRight, Clock, Filter, LayoutDashboard, Database,
   Loader2, Rss, Globe, Bot, Copy, ChevronDown, ChevronUp,
-  Pause, Play, Image, Send, ShieldCheck,
+  Pause, Play, Image, Send, ShieldCheck, Save,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { NumericInput } from "../components/ui/numeric-input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { Pagination, usePagination } from "../components/Pagination";
+import { Pagination } from "../components/Pagination";
 import {
   Select,
   SelectContent,
@@ -20,27 +23,30 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import {
-  type WebsiteFullConfig, type RssArticleOnlyConfig, type Job,
-} from "../data/mock-data";
+import type { Job, RssArticleOnlyConfig, WebsiteFullConfig } from "../types/domain";
 import { useTeam } from "../context/TeamContext";
 // ── Service + guard layer ─────────────────────────────────────────────
 import * as sourceService from "../services/sourceService";
 import * as channelService from "../services/channelService";
-import * as itemService from "../services/itemService";
-import * as postService from "../services/postService";
 import * as jobService from "../services/jobService";
-import * as teamService from "../services/teamService";
+import { useTeamItems } from "../hooks/useTeamItems";
+import { useTeamPosts } from "../hooks/useTeamPosts";
+import { useTeamJobs } from "../hooks/useTeamJobs";
 import { useTeamScopedEntity } from "../hooks/useTeamScopedEntity";
 import { TeamScopeGuard } from "../components/TeamScopeGuard";
 import { TagBadge } from "../components/TagBadge";
 import { AssignTagsPopover } from "../components/AssignTagsPopover";
-import { PeriodPicker, isInPeriod } from "../components/PeriodPicker";
+import { PeriodPicker } from "../components/PeriodPicker";
 import type { DateRange } from "react-day-picker";
+import { useAsync } from "../lib/asyncState";
+import { listTeamPosts } from "../services/postService";
+import { MediaStatusHint } from "../components/MediaStatusHint";
 
 const ITEMS_PAGE_SIZE     = 8;
 const PUBLISHED_PAGE_SIZE = 8;
 const JOBS_PAGE_SIZE      = 10;
+const OVERVIEW_ITEMS_COUNT = 5;
+const OVERVIEW_POSTS_COUNT = 5;
 
 const SOURCE_TYPE_LABEL: Record<string, string> = {
   telegram: "Telegram канал",
@@ -50,17 +56,74 @@ const SOURCE_TYPE_LABEL: Record<string, string> = {
 
 type ItemPublishFilter = "all" | "published" | "unpublished";
 type JobStatusFilter   = "all" | "success" | "failed" | "running" | "pending";
+type SourceScanIntervalUnit = "minutes" | "hours";
+
+function startOfDayIso(date?: Date) {
+  if (!date) return undefined;
+  const value = new Date(date);
+  value.setHours(0, 0, 0, 0);
+  return value.toISOString();
+}
+
+function endOfDayIso(date?: Date) {
+  if (!date) return undefined;
+  const value = new Date(date);
+  value.setHours(23, 59, 59, 999);
+  return value.toISOString();
+}
+
+function formatIntervalLabel(value?: number | null) {
+  if (!value || !Number.isFinite(value)) return "не задан";
+  if (value % 3600 === 0) return `${value / 3600} ч`;
+  if (value % 60 === 0) return `${value / 60} мин`;
+  return `${value} сек`;
+}
+
+function getScanIntervalUnitSeconds(unit: SourceScanIntervalUnit) {
+  return unit === "hours" ? 3600 : 60;
+}
+
+function getScanIntervalDraftUnit(valueSec: number): SourceScanIntervalUnit {
+  return valueSec >= 3600 && valueSec % 3600 === 0 ? "hours" : "minutes";
+}
+
+function getScanIntervalDraftAmount(valueSec: number, unit: SourceScanIntervalUnit) {
+  const unitSeconds = getScanIntervalUnitSeconds(unit);
+  return Math.max(1, Math.ceil(valueSec / unitSeconds));
+}
+
+function clampScanIntervalDraftAmount(
+  amount: number,
+  unit: SourceScanIntervalUnit,
+  minSec: number,
+  maxSec: number,
+) {
+  const unitSeconds = getScanIntervalUnitSeconds(unit);
+  const minAmount = Math.max(1, Math.ceil(minSec / unitSeconds));
+  const maxAmount = Math.max(minAmount, Math.floor(maxSec / unitSeconds));
+
+  return Math.min(Math.max(amount, minAmount), maxAmount);
+}
+
+function toScanIntervalSec(
+  amount: number,
+  unit: SourceScanIntervalUnit,
+  minSec: number,
+  maxSec: number,
+) {
+  return clampScanIntervalDraftAmount(amount, unit, minSec, maxSec) * getScanIntervalUnitSeconds(unit);
+}
 
 export function SourceDetailPage() {
   const { sourceId } = useParams();
-  const { currentTeamId } = useTeam();
+  const { currentTeam, currentTeamId } = useTeam();
   const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
+  const team = currentTeam;
 
   // ── Team scope guard: хук загружает источник через сервис и
   //    автоматически редиректит если он не принадлежит текущей команде ──
-  const { state: sourceState } = useTeamScopedEntity(
-    () => sourceService.getSourceById(sourceId!, currentTeamId!),
+  const { state: sourceState, invalidate: invalidateSource } = useTeamScopedEntity(
+    () => sourceService.getSourceById(sourceId!, currentTeamId!, { fresh: true }),
     [sourceId, currentTeamId],
     "/sources",
   );
@@ -70,7 +133,7 @@ export function SourceDetailPage() {
   const [publishedPage, setPublishedPage] = useState(1);
   const [jobsPage,      setJobsPage]      = useState(1);
 
-  // ── Content tab filters ──────────────��────────────────────────────────
+  // ── Content tab filters ─────────────────────────────────────────────
   const [itemPublishFilter, setItemPublishFilter] = useState<ItemPublishFilter>("all");
   const [itemDateFilter,    setItemDateFilter]    = useState<DateRange | undefined>();
 
@@ -81,35 +144,38 @@ export function SourceDetailPage() {
   // ── Jobs tab filters ──────────────────────────────────────────────────
   const [jobStatusFilter, setJobStatusFilter] = useState<JobStatusFilter>("all");
   const [jobDateFilter,   setJobDateFilter]   = useState<DateRange | undefined>();
+  const [activeTab, setActiveTab] = useState("overview");
 
   // ── Scanning state ──────────────────────────────────────────────────
   const [isScanning, setIsScanning] = useState(false);
 
-  const handleScan = async () => {
-    if (sourceState.status !== "success" || !currentTeamId) return;
-    const src = sourceState.data;
-    setIsScanning(true);
-    const result = await sourceService.scanSourceNow(src.id, currentTeamId);
-    if (result.ok) {
-      toast.success("Сканирование запущено", { description: `Job ${result.data.id} создан` });
-      setTimeout(() => {
-        setIsScanning(false);
-        toast.success(`Сканирование завершено. Новых материалов: ${(result.data.result as { newItemsCount?: number })?.newItemsCount ?? "?"}`);
-      }, 4000);
-    } else {
-      setIsScanning(false);
-      toast.error(result.error);
-    }
-  };
-
   // ── Active toggle state ────────────────────────────────────────────
   // Инициализируется после загрузки источника через useEffect
   const [localIsActive, setLocalIsActive] = useState(true);
+  const [sourceNameDraft, setSourceNameDraft] = useState("");
+  const [sourceScanIntervalMode, setSourceScanIntervalMode] = useState<"default" | "custom">("default");
+  const [sourceScanIntervalDraft, setSourceScanIntervalDraft] = useState(5);
+  const [sourceScanIntervalUnitDraft, setSourceScanIntervalUnitDraft] = useState<SourceScanIntervalUnit>("minutes");
+  const [isSavingSourceSettings, setIsSavingSourceSettings] = useState(false);
+  const sourceData = sourceState.status === "success" ? sourceState.data : null;
+
   useEffect(() => {
-    if (sourceState.status === "success") {
-      setLocalIsActive(sourceState.data.isActive);
+    if (sourceData) {
+      setLocalIsActive(sourceData.isActive);
     }
-  }, [sourceState.status]);
+  }, [sourceData]);
+
+  useEffect(() => {
+    if (sourceData) {
+      setSourceNameDraft(sourceData.name);
+      const fallbackInterval = sourceData.minScanIntervalSec ?? sourceData.effectiveScanIntervalSec ?? 300;
+      setSourceScanIntervalMode(sourceData.scanIntervalSec && sourceData.scanIntervalSec > 0 ? "custom" : "default");
+      const nextIntervalSec = sourceData.scanIntervalSec ?? sourceData.effectiveScanIntervalSec ?? fallbackInterval;
+      const nextUnit = getScanIntervalDraftUnit(nextIntervalSec);
+      setSourceScanIntervalUnitDraft(nextUnit);
+      setSourceScanIntervalDraft(getScanIntervalDraftAmount(nextIntervalSec, nextUnit));
+    }
+  }, [sourceData]);
   const [showPauseConfirm, setShowPauseConfirm] = useState(false);
 
   // ── Delete confirmation ─────────────────────────────────────────────
@@ -121,6 +187,7 @@ export function SourceDetailPage() {
   const [agentDone, setAgentDone] = useState(false);
   const [agentNewConfig, setAgentNewConfig] = useState<WebsiteFullConfig | null>(null);
   const [agentJob, setAgentJob] = useState<Job | null>(null);
+  const [agentStages, setAgentStages] = useState<AgentRuntimeStage[]>([]);
   const [configExpanded, setConfigExpanded] = useState(false);
 
   // ── RSS article agent re-onboard state ───────────────────────────
@@ -128,10 +195,439 @@ export function SourceDetailPage() {
   const [rssAgentDone, setRssAgentDone] = useState(false);
   const [rssAgentNewConfig, setRssAgentNewConfig] = useState<RssArticleOnlyConfig | null>(null);
   const [rssAgentJob, setRssAgentJob] = useState<Job | null>(null);
+  const [rssAgentStages, setRssAgentStages] = useState<AgentRuntimeStage[]>([]);
+  const [rssConfigExpanded, setRssConfigExpanded] = useState(false);
 
   // ── Telegram permissions check ────────────────────────────────────
   const [checkingPermissions, setCheckingPermissions] = useState(false);
   const [, forceTagUpdate] = useState(0);
+  const [, setDataVersion] = useState(0);
+  const [agentPreviewArticles, setAgentPreviewArticles] = useState<AgentArticle[]>([]);
+  const [rssAgentSampleItems, setRssAgentSampleItems] = useState<Array<{ title?: string; url?: string; content?: string; date?: string; imageUrl?: string | null }>>([]);
+
+  const now = new Date();
+  const weekAgoDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const { state: sourceItemsState, invalidate: invalidateSourceItems } = useTeamItems({
+    page: itemsPage,
+    limit: ITEMS_PAGE_SIZE,
+    sourceId: sourceId,
+    published: itemPublishFilter,
+    from: startOfDayIso(itemDateFilter?.from),
+    to: endOfDayIso(itemDateFilter?.to),
+  });
+  const { state: sourceItemsSummaryState, invalidate: invalidateSourceItemsSummary } = useTeamItems({
+    page: 1,
+    limit: 1,
+    sourceId: sourceId,
+  });
+  const { state: overviewItemsState, invalidate: invalidateOverviewItems } = useTeamItems({
+    page: 1,
+    limit: OVERVIEW_ITEMS_COUNT,
+    sourceId: sourceId,
+  });
+  const { state: sourcePostsState, invalidate: invalidateSourcePosts } = useTeamPosts({
+    page: publishedPage,
+    limit: PUBLISHED_PAGE_SIZE,
+    sourceId: sourceId,
+    channelId: pubsChannelFilter !== "all" ? pubsChannelFilter : undefined,
+    from: startOfDayIso(pubsDateFilter?.from),
+    to: endOfDayIso(pubsDateFilter?.to),
+  });
+  const { state: sourcePostsSummaryState, invalidate: invalidateSourcePostsSummary } = useTeamPosts({
+    page: 1,
+    limit: 1,
+    sourceId: sourceId,
+  });
+  const { state: overviewPostsState, invalidate: invalidateOverviewPosts } = useTeamPosts({
+    page: 1,
+    limit: OVERVIEW_POSTS_COUNT,
+    sourceId: sourceId,
+  });
+  const { state: sourcePostsTodayState, invalidate: invalidateSourcePostsToday } = useTeamPosts({
+    page: 1,
+    limit: 1,
+    sourceId: sourceId,
+    from: startOfDayIso(now),
+  });
+  const { state: sourcePostsWeekState, invalidate: invalidateSourcePostsWeek } = useTeamPosts({
+    page: 1,
+    limit: 1,
+    sourceId: sourceId,
+    from: startOfDayIso(weekAgoDate),
+  });
+  const { state: sourceJobsState, invalidate: invalidateSourceJobs } = useTeamJobs({
+    page: jobsPage,
+    limit: JOBS_PAGE_SIZE,
+    sourceId: sourceId,
+    status: jobStatusFilter !== "all" ? jobStatusFilter : undefined,
+    from: startOfDayIso(jobDateFilter?.from),
+    to: endOfDayIso(jobDateFilter?.to),
+  });
+  const { state: sourceJobsSummaryState, invalidate: invalidateSourceJobsSummary } = useTeamJobs({
+    page: 1,
+    limit: 1,
+    sourceId: sourceId,
+  });
+
+  const refreshSourceData = useCallback(async () => {
+    if (!currentTeamId || !sourceId) {
+      return;
+    }
+
+    await sourceService.getSourceById(sourceId, currentTeamId, { fresh: true });
+
+    invalidateSource();
+    invalidateSourceItems();
+    invalidateSourceItemsSummary();
+    invalidateOverviewItems();
+    invalidateSourcePosts();
+    invalidateSourcePostsSummary();
+    invalidateOverviewPosts();
+    invalidateSourcePostsToday();
+    invalidateSourcePostsWeek();
+    invalidateSourceJobs();
+    invalidateSourceJobsSummary();
+    invalidateChannelPublicationCounts();
+    setDataVersion((version) => version + 1);
+  }, [
+    currentTeamId,
+    invalidateSource,
+    invalidateSourceItems,
+    invalidateSourceItemsSummary,
+    invalidateOverviewItems,
+    invalidateSourceJobs,
+    invalidateSourceJobsSummary,
+    invalidateOverviewPosts,
+    invalidateSourcePosts,
+    invalidateSourcePostsSummary,
+    invalidateSourcePostsToday,
+    invalidateSourcePostsWeek,
+    sourceId,
+  ]);
+
+  const waitForJobCompletion = useCallback(
+    async (jobId: string, options: { intervalMs?: number } = {}) => {
+      if (!currentTeamId) {
+        return null;
+      }
+
+      const intervalMs = options.intervalMs ?? 2000;
+      while (true) {
+        const job = await jobService.getJobById(jobId, currentTeamId);
+        if (!job) {
+          return null;
+        }
+
+        if (["success", "failed", "canceled", "timed_out"].includes(job.status)) {
+          return job;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, intervalMs));
+      }
+
+      return null;
+    },
+    [currentTeamId],
+  );
+
+  const waitForAgentResult = useCallback(
+    async (jobId: string, onUpdate?: (job: AgentJobState) => void) => {
+      while (true) {
+        const job = await sourceService.getSourceAgentJob(jobId);
+        onUpdate?.(job);
+        if (["success", "failed", "canceled", "timed_out"].includes(job.status)) {
+          return job;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+
+      return null;
+    },
+    [],
+  );
+
+  const handleScan = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) return;
+
+    const src = sourceState.data;
+    setIsScanning(true);
+    const result = await sourceService.scanSourceNow(src.id, currentTeamId);
+    if (!result.ok) {
+      setIsScanning(false);
+      toast.error(result.error);
+      return;
+    }
+
+    toast.success("Сканирование запущено", { description: `Job ${result.data.id} создан` });
+    await refreshSourceData();
+
+    const completedJob = await waitForJobCompletion(result.data.id);
+    setIsScanning(false);
+    await refreshSourceData();
+
+    if (!completedJob) {
+      toast("Сканирование ещё выполняется", {
+        description: "Данные на странице продолжат обновляться автоматически.",
+      });
+      return;
+    }
+
+    if (completedJob.status === "success") {
+      toast.success("Сканирование завершено", {
+        description: `Новых материалов: ${Number((completedJob.result as { newItemsCount?: number } | undefined)?.newItemsCount ?? 0)}`,
+      });
+      return;
+    }
+
+    toast.error(completedJob.error ?? "Сканирование завершилось с ошибкой");
+  }, [currentTeamId, refreshSourceData, sourceState, waitForJobCompletion]);
+
+  const handlePauseSource = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    const result = await sourceService.pauseSource(sourceState.data.id, currentTeamId);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    setLocalIsActive(false);
+    setShowPauseConfirm(false);
+    await refreshSourceData();
+    toast.success("Источник остановлен");
+  }, [currentTeamId, refreshSourceData, sourceState]);
+
+  const handleResumeSource = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    const result = await sourceService.resumeSource(sourceState.data.id, currentTeamId);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    setLocalIsActive(true);
+    await refreshSourceData();
+    toast.success("Источник включён");
+  }, [currentTeamId, refreshSourceData, sourceState]);
+
+  const handleSaveSourceSettings = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    const nextName = sourceNameDraft.trim();
+    if (!nextName) {
+      toast.error("Введите название источника");
+      return;
+    }
+
+    const minScanIntervalSec = sourceState.data.minScanIntervalSec ?? sourceState.data.effectiveScanIntervalSec ?? 300;
+    const maxScanIntervalSec = sourceState.data.maxScanIntervalSec ?? 86400;
+    const nextScanIntervalSec =
+      sourceScanIntervalMode === "default"
+        ? null
+        : toScanIntervalSec(
+            sourceScanIntervalDraft,
+            sourceScanIntervalUnitDraft,
+            minScanIntervalSec,
+            maxScanIntervalSec,
+          );
+    const currentScanIntervalSec = sourceState.data.scanIntervalSec ?? null;
+
+    if (nextName === sourceState.data.name && nextScanIntervalSec === currentScanIntervalSec) {
+      return;
+    }
+
+    setIsSavingSourceSettings(true);
+    const result = await sourceService.updateSourceSettings(sourceState.data.id, currentTeamId, {
+      name: nextName,
+      scanIntervalSec: nextScanIntervalSec,
+    });
+    if (!result.ok) {
+      setIsSavingSourceSettings(false);
+      toast.error(result.error);
+      return;
+    }
+
+    setSourceNameDraft(result.data.name);
+    setSourceScanIntervalMode(result.data.scanIntervalSec && result.data.scanIntervalSec > 0 ? "custom" : "default");
+    const nextIntervalSec =
+      result.data.scanIntervalSec
+      ?? result.data.effectiveScanIntervalSec
+      ?? result.data.minScanIntervalSec
+      ?? minScanIntervalSec;
+    const nextUnit = getScanIntervalDraftUnit(nextIntervalSec);
+    setSourceScanIntervalUnitDraft(nextUnit);
+    setSourceScanIntervalDraft(getScanIntervalDraftAmount(nextIntervalSec, nextUnit));
+    await refreshSourceData();
+    setIsSavingSourceSettings(false);
+    toast.success("Настройки источника сохранены");
+  }, [currentTeamId, refreshSourceData, sourceNameDraft, sourceScanIntervalDraft, sourceScanIntervalMode, sourceScanIntervalUnitDraft, sourceState]);
+
+  const handleRunWebsiteAgent = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    setAgentRunning(true);
+    setAgentDone(false);
+    setAgentNewConfig(null);
+    setAgentPreviewArticles([]);
+    setAgentStages([]);
+
+    const result = await sourceService.reonboardSource(sourceState.data.id, currentTeamId);
+    if (!result.ok) {
+      setAgentRunning(false);
+      toast.error(result.error);
+      return;
+    }
+
+    setAgentJob(result.data);
+    const finalJob = await waitForAgentResult(result.data.id, (nextJob) => {
+      setAgentStages(nextJob.liveStages ?? nextJob.stages ?? []);
+    });
+    setAgentRunning(false);
+
+    if (!finalJob) {
+      toast.error("Не удалось получить результат агента");
+      return;
+    }
+
+    if (finalJob.status !== "success" || !finalJob.config) {
+      toast.error(finalJob.errorText ?? "Агент завершился с ошибкой");
+      return;
+    }
+
+    setAgentDone(true);
+    setAgentNewConfig(finalJob.config as WebsiteFullConfig);
+    setAgentPreviewArticles((finalJob.preview?.sampleArticles as AgentArticle[] | undefined) ?? []);
+    setAgentStages(finalJob.stages ?? finalJob.liveStages ?? []);
+  }, [currentTeamId, sourceState, waitForAgentResult]);
+
+  const handleRunRssAgent = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    setRssAgentRunning(true);
+    setRssAgentDone(false);
+    setRssAgentNewConfig(null);
+    setRssAgentSampleItems([]);
+    setRssAgentStages([]);
+
+    const result = await sourceService.reonboardRssArticle(sourceState.data.id, currentTeamId);
+    if (!result.ok) {
+      setRssAgentRunning(false);
+      toast.error(result.error);
+      return;
+    }
+
+    setRssAgentJob(result.data);
+    const finalJob = await waitForAgentResult(result.data.id, (nextJob) => {
+      setRssAgentStages(nextJob.liveStages ?? nextJob.stages ?? []);
+    });
+    setRssAgentRunning(false);
+
+    if (!finalJob) {
+      toast.error("Не удалось получить результат article-агента");
+      return;
+    }
+
+    if (finalJob.status !== "success" || !finalJob.config) {
+      toast.error(finalJob.errorText ?? "Article-агент завершился с ошибкой");
+      return;
+    }
+
+    setRssAgentDone(true);
+    setRssAgentNewConfig(finalJob.config as RssArticleOnlyConfig);
+    setRssAgentSampleItems((finalJob.preview?.sampleItems as Array<{ title?: string; url?: string; content?: string; date?: string; imageUrl?: string | null }> | undefined) ?? []);
+    setRssAgentStages(finalJob.stages ?? finalJob.liveStages ?? []);
+  }, [currentTeamId, sourceState, waitForAgentResult]);
+
+  const handleApplyWebsiteConfig = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId || !agentNewConfig || !agentJob) {
+      return;
+    }
+
+    const result = await sourceService.applySourceConfig(sourceState.data.id, currentTeamId, agentJob.id, agentNewConfig);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    setAgentDone(false);
+    setAgentNewConfig(null);
+    setAgentPreviewArticles([]);
+    setAgentStages([]);
+    setAgentJob(null);
+    await refreshSourceData();
+    toast.success("Конфигурация обновлена");
+  }, [agentJob, agentNewConfig, currentTeamId, refreshSourceData, sourceState]);
+
+  const handleApplyRssConfig = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId || !rssAgentNewConfig || !rssAgentJob) {
+      return;
+    }
+
+    const result = await sourceService.applySourceRssConfig(sourceState.data.id, currentTeamId, rssAgentJob.id, rssAgentNewConfig);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    setRssAgentDone(false);
+    setRssAgentNewConfig(null);
+    setRssAgentSampleItems([]);
+    setRssAgentStages([]);
+    setRssAgentJob(null);
+    await refreshSourceData();
+    toast.success("Конфигурация article-парсера обновлена");
+  }, [currentTeamId, refreshSourceData, rssAgentJob, rssAgentNewConfig, sourceState]);
+
+  const handleCheckTelegramPermissions = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    setCheckingPermissions(true);
+    const result = await sourceService.checkTelegramSourceAccess(sourceState.data.id, currentTeamId);
+    setCheckingPermissions(false);
+
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    await refreshSourceData();
+    if (result.data === "ok") {
+      toast.success("Доступ подтверждён — userbot может читать этот канал");
+      return;
+    }
+
+    toast.error("Userbot пока не может читать этот канал. Проверьте username и авторизацию user-account.");
+  }, [currentTeamId, refreshSourceData, sourceState]);
+
+  const handleDeleteSource = useCallback(async () => {
+    if (sourceState.status !== "success" || !currentTeamId) {
+      return;
+    }
+
+    const result = await sourceService.deleteSource(sourceState.data.id, currentTeamId);
+    if (!result.ok) {
+      toast.error(result.error);
+      return;
+    }
+
+    toast.success("Источник удалён");
+    navigate("/sources");
+  }, [currentTeamId, navigate, sourceState]);
 
   if (!team) {
     return (
@@ -143,83 +639,92 @@ export function SourceDetailPage() {
     );
   }
 
-  // ── Raw data (через сервисный слой) ──────────────────────────────────
-  const sourceItems = itemService.getItemsBySourceId(sourceId!)
-    .sort((a, b) => new Date(b.extractedAt).getTime() - new Date(a.extractedAt).getTime());
+  const sourceItemsResult = sourceItemsState.status === "success" ? sourceItemsState.data : null;
+  const sourceItemsSummaryResult = sourceItemsSummaryState.status === "success" ? sourceItemsSummaryState.data : null;
+  const overviewItemsResult = overviewItemsState.status === "success" ? overviewItemsState.data : null;
+  const sourcePostsResult = sourcePostsState.status === "success" ? sourcePostsState.data : null;
+  const sourcePostsSummaryResult = sourcePostsSummaryState.status === "success" ? sourcePostsSummaryState.data : null;
+  const overviewPostsResult = overviewPostsState.status === "success" ? overviewPostsState.data : null;
+  const sourcePostsTodayResult = sourcePostsTodayState.status === "success" ? sourcePostsTodayState.data : null;
+  const sourcePostsWeekResult = sourcePostsWeekState.status === "success" ? sourcePostsWeekState.data : null;
+  const sourceJobsResult = sourceJobsState.status === "success" ? sourceJobsState.data : null;
+  const sourceJobsSummaryResult = sourceJobsSummaryState.status === "success" ? sourceJobsSummaryState.data : null;
 
-  const publishedFromSource = postService.getPostsBySourceId(sourceId!)
-    .sort((a, b) => new Date(b.postedAt).getTime() - new Date(a.postedAt).getTime());
-
-  const sourceJobs = jobService.getJobsBySourceId(sourceId!, currentTeamId!)
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-
+  const sourceItems = sourceItemsResult?.data ?? [];
+  const overviewItems = overviewItemsResult?.data ?? [];
+  const publishedFromSource = sourcePostsResult?.data ?? [];
+  const overviewPublished = overviewPostsResult?.data ?? [];
+  const sourceJobs = sourceJobsResult?.data ?? [];
   const linkedChannels = sourceService.getChannelsForSource(sourceId!, currentTeamId!);
+  const linkedChannelIdsKey = linkedChannels.map((channel) => channel.id).join(",");
+  const fetchChannelPublicationTotals = useCallback(async () => {
+    if (!currentTeamId || !sourceId || linkedChannels.length === 0) {
+      return [];
+    }
 
-  const getPublicationsForItem = (itemId: string) =>
-    publishedFromSource.filter(p => p.itemId === itemId);
+    const counts = await Promise.all(
+      linkedChannels.map(async (channel) => {
+        const result = await listTeamPosts(currentTeamId, {
+          page: 1,
+          limit: 1,
+          sourceId,
+          channelId: channel.id,
+        });
 
-  // ── Date helpers ────────────────────────────────────────────────────
-  const now      = new Date();
-  const todayStr = now.toISOString().split("T")[0];
-  const weekAgo  = new Date(now.getTime() - 7  * 24 * 60 * 60 * 1000);
-  const monthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        return [channel.id, result.total] as const;
+      }),
+    );
 
-  // ── Content tab filtering ─────────────────────────────────────────────
-  const publishedItemIds = new Set(publishedFromSource.map(p => p.itemId));
+    return counts;
+  }, [currentTeamId, linkedChannelIdsKey, sourceId]);
+  const { state: channelPublicationCountsState, invalidate: invalidateChannelPublicationCounts } = useAsync(
+    fetchChannelPublicationTotals,
+    [fetchChannelPublicationTotals],
+    { keepPreviousData: true },
+  );
+  const channelPublicationCounts = new Map<string, number>(channelPublicationCountsState.status === "success"
+    ? channelPublicationCountsState.data
+    : []);
 
-  const countAll         = sourceItems.length;
-  const countPublished   = sourceItems.filter(i =>  publishedItemIds.has(i.id)).length;
-  const countUnpublished = sourceItems.filter(i => !publishedItemIds.has(i.id)).length;
+  const countAll = sourceItemsSummaryResult?.total ?? 0;
+  const countPublished = sourceItemsSummaryResult?.facets?.publishCounts.published ?? 0;
+  const countUnpublished = sourceItemsSummaryResult?.facets?.publishCounts.unpublished ?? 0;
 
-  const filteredItems = sourceItems.filter((item) => {
-    if (itemPublishFilter === "published"   && !publishedItemIds.has(item.id)) return false;
-    if (itemPublishFilter === "unpublished" &&  publishedItemIds.has(item.id)) return false;
-    return isInPeriod(item.extractedAt, itemDateFilter);
-  });
+  const filteredItems = sourceItems;
 
   const handleItemPublishFilter = (v: ItemPublishFilter) => { setItemPublishFilter(v); setItemsPage(1); };
   const handleItemDateFilter    = (v: DateRange | undefined) => { setItemDateFilter(v);    setItemsPage(1); };
 
-  // ── Publications tab filtering ────────────────────────────────────���─
+  // ── Publications tab filtering ─────────────────────────────────────
   // Unique channels that appear in publications
-  const pubChannelOptions = Array.from(
-    new Map(publishedFromSource.map(p => [p.channelId, p.channelName])).entries()
-  );
-
-  const filteredPubs = publishedFromSource.filter((p) => {
-    if (pubsChannelFilter !== "all" && p.channelId !== pubsChannelFilter) return false;
-    return isInPeriod(p.postedAt, pubsDateFilter);
-  });
+  const pubChannelOptions = linkedChannels.map((channel) => [channel.id, channel.name] as const);
+  const filteredPubs = publishedFromSource;
 
   const handlePubsChannelFilter = (v: string)                => { setPubsChannelFilter(v); setPublishedPage(1); };
   const handlePubsDateFilter    = (v: DateRange | undefined) => { setPubsDateFilter(v);    setPublishedPage(1); };
 
   // ── Jobs tab filtering ───────────────────────────────────────────────
-  const jobStatusCounts: Record<string, number> = { all: sourceJobs.length };
-  for (const j of sourceJobs) {
-    jobStatusCounts[j.status] = (jobStatusCounts[j.status] ?? 0) + 1;
-  }
-
-  const filteredJobs = sourceJobs.filter((j) => {
-    if (jobStatusFilter !== "all" && j.status !== jobStatusFilter) return false;
-    return isInPeriod(j.createdAt, jobDateFilter);
-  });
+  const jobStatusCounts: Record<string, number> = sourceJobsSummaryResult?.facets?.statusCounts ?? { all: sourceJobsSummaryResult?.total ?? 0 };
+  const filteredJobs = sourceJobs;
 
   const handleJobStatusFilter = (v: JobStatusFilter)         => { setJobStatusFilter(v); setJobsPage(1); };
   const handleJobDateFilter   = (v: DateRange | undefined)   => { setJobDateFilter(v);   setJobsPage(1); };
 
   // ── Pagination ────────────────────────────────────────────────────────
-  const { totalPages: itemsTotalPages,     paginate: itemsPaginate,     totalItems: itemsTotal }     = usePagination(filteredItems,    ITEMS_PAGE_SIZE);
-  const { totalPages: publishedTotalPages, paginate: publishedPaginate, totalItems: publishedTotal } = usePagination(filteredPubs,      PUBLISHED_PAGE_SIZE);
-  const { totalPages: jobsTotalPages,      paginate: jobsPaginate,      totalItems: jobsTotal }      = usePagination(filteredJobs,      JOBS_PAGE_SIZE);
+  const itemsTotal = sourceItemsResult?.total ?? 0;
+  const publishedTotal = sourcePostsResult?.total ?? 0;
+  const jobsTotal = sourceJobsResult?.total ?? 0;
+  const itemsTotalPages = Math.max(1, Math.ceil(itemsTotal / ITEMS_PAGE_SIZE));
+  const publishedTotalPages = Math.max(1, Math.ceil(publishedTotal / PUBLISHED_PAGE_SIZE));
+  const jobsTotalPages = Math.max(1, Math.ceil(jobsTotal / JOBS_PAGE_SIZE));
 
-  const pageItems     = itemsPaginate(itemsPage);
-  const pagePublished = publishedPaginate(publishedPage);
-  const pageJobs      = jobsPaginate(jobsPage);
+  const pageItems = filteredItems;
+  const pagePublished = filteredPubs;
+  const pageJobs = filteredJobs;
 
   // ── Stats for summary cards ───────────────────────────────────────────
-  const pubsToday = publishedFromSource.filter(p => p.postedAt.startsWith(todayStr)).length;
-  const pubsWeek  = publishedFromSource.filter(p => new Date(p.postedAt) >= weekAgo).length;
+  const pubsToday = sourcePostsTodayResult?.total ?? 0;
+  const pubsWeek  = sourcePostsWeekResult?.total ?? 0;
 
   // ── Filter option arrays ──────────────────────────────────────────────
   const itemPublishFilterOptions: { value: ItemPublishFilter; label: string; count: number }[] = [
@@ -237,6 +742,39 @@ export function SourceDetailPage() {
   ];
 
   // ═══════════════════════════════════════════════════════════════════
+  const sourceSettingsMinScanIntervalSec = sourceData?.minScanIntervalSec ?? sourceData?.effectiveScanIntervalSec ?? 300;
+  const sourceSettingsMaxScanIntervalSec = sourceData?.maxScanIntervalSec ?? 86400;
+  const sourceSettingsCurrentScanIntervalSec = sourceData?.scanIntervalSec ?? null;
+  const sourceSettingsNextScanIntervalSec =
+    sourceScanIntervalMode === "default"
+      ? null
+      : toScanIntervalSec(
+          sourceScanIntervalDraft,
+          sourceScanIntervalUnitDraft,
+          sourceSettingsMinScanIntervalSec,
+          sourceSettingsMaxScanIntervalSec,
+        );
+  const sourceSettingsEffectiveScanIntervalSec =
+    sourceData?.effectiveScanIntervalSec
+    ?? sourceData?.scanIntervalSec
+    ?? sourceSettingsMinScanIntervalSec;
+  const sourceSettingsMinScanIntervalDraft = clampScanIntervalDraftAmount(
+    getScanIntervalDraftAmount(sourceSettingsMinScanIntervalSec, sourceScanIntervalUnitDraft),
+    sourceScanIntervalUnitDraft,
+    sourceSettingsMinScanIntervalSec,
+    sourceSettingsMaxScanIntervalSec,
+  );
+  const sourceSettingsMaxScanIntervalDraft = clampScanIntervalDraftAmount(
+    getScanIntervalDraftAmount(sourceSettingsMaxScanIntervalSec, sourceScanIntervalUnitDraft),
+    sourceScanIntervalUnitDraft,
+    sourceSettingsMinScanIntervalSec,
+    sourceSettingsMaxScanIntervalSec,
+  );
+  const hasSourceSettingsChanges = sourceData
+    ? sourceNameDraft.trim() !== sourceData.name
+      || sourceSettingsNextScanIntervalSec !== sourceSettingsCurrentScanIntervalSec
+    : false;
+
   return (
     <TeamScopeGuard state={sourceState} notFoundLabel="Источник не найден или недоступен в этой команде">
     {(source) => (
@@ -319,12 +857,7 @@ export function SourceDetailPage() {
                   variant="outline"
                   size="sm"
                   className="text-amber-600 border-amber-300 bg-amber-50 hover:bg-amber-100"
-                  onClick={async () => {
-                    await sourceService.pauseSource(source.id, currentTeamId!);
-                    setLocalIsActive(false);
-                    setShowPauseConfirm(false);
-                    toast.success("Источник остановлен");
-                  }}
+                  onClick={handlePauseSource}
                 >
                   Да, остановить
                 </Button>
@@ -350,11 +883,7 @@ export function SourceDetailPage() {
             <Button
               variant="outline"
               className="text-green-600 border-green-200 hover:bg-green-50"
-              onClick={async () => {
-                await sourceService.resumeSource(source.id, currentTeamId!);
-                setLocalIsActive(true);
-                toast.success("Источник включён");
-              }}
+              onClick={handleResumeSource}
             >
               <Play className="size-4 mr-2" />
               Включить
@@ -385,7 +914,7 @@ export function SourceDetailPage() {
             size="sm"
             variant="outline"
             className="shrink-0 text-green-600 border-green-300 hover:bg-green-50"
-            onClick={async () => { await sourceService.resumeSource(source.id, currentTeamId!); setLocalIsActive(true); toast.success("Источник включён"); }}
+            onClick={handleResumeSource}
           >
             <Play className="size-3.5 mr-1.5" />
             Включить
@@ -401,133 +930,38 @@ export function SourceDetailPage() {
         </div>
       )}
 
-      {/* Summary cards */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <Card className="overflow-hidden">
-          <div className="px-5 pt-4 pb-1 flex items-center gap-2">
-            <div className="size-7 rounded-md bg-blue-50 flex items-center justify-center">
-              <FileText className="size-3.5 text-blue-500" />
-            </div>
-            <span className="text-sm font-semibold text-gray-700">Материалов собрано</span>
-          </div>
-          <CardContent className="pt-3 pb-4">
-            <div className="grid grid-cols-2 divide-x divide-y divide-gray-100 border border-gray-100 rounded-xl overflow-hidden">
-              {[
-                { label: "Сегодня", value: source.itemsCount24h },
-                { label: "Неделя",  value: source.itemsCountWeek },
-                { label: "Месяц",   value: source.itemsCountMonth },
-                { label: "Всего",   value: source.itemsCount },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex flex-col items-center justify-center py-3 px-2 bg-white hover:bg-gray-50 transition-colors">
-                  <span className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{value}</span>
-                  <span className="text-xs text-gray-400 mt-1">{label}</span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="overflow-hidden">
-          <div className="px-5 pt-4 pb-1 flex items-center gap-2">
-            <div className="size-7 rounded-md bg-green-50 flex items-center justify-center">
-              <Newspaper className="size-3.5 text-green-500" />
-            </div>
-            <span className="text-sm font-semibold text-gray-700">Публикаций из источника</span>
-          </div>
-          <CardContent className="pt-3 pb-4">
-            <div className="grid grid-cols-2 divide-x divide-y divide-gray-100 border border-gray-100 rounded-xl overflow-hidden">
-              {[
-                { label: "Сегодня", value: pubsToday },
-                { label: "Неделя",  value: pubsWeek },
-                { label: "Всего",   value: publishedFromSource.length },
-                { label: "Задач",   value: sourceJobs.length },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex flex-col items-center justify-center py-3 px-2 bg-white hover:bg-gray-50 transition-colors">
-                  <span className="text-2xl font-bold text-gray-900 tabular-nums leading-none">{value}</span>
-                  <span className="text-xs text-gray-400 mt-1">{label}</span>
-                </div>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">Информация</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex items-center gap-2.5">
-              <div className="size-7 rounded-md bg-gray-50 flex items-center justify-center shrink-0">
-                <Clock className="size-3.5 text-gray-400" />
-              </div>
-              <div>
-                <p className="text-xs text-gray-400">Последнее обновление</p>
-                <p className="text-sm font-medium text-gray-800">
-                  {source.lastFetchedAt
-                    ? new Date(source.lastFetchedAt).toLocaleString("ru-RU", {
-                        day: "numeric", month: "short",
-                        hour: "2-digit", minute: "2-digit",
-                      })
-                    : "Никогда"}
-                </p>
-              </div>
-            </div>
-            {linkedChannels.length > 0 && (
-              <div className="border-t pt-3">
-                <p className="text-xs text-gray-400 mb-2">
-                  Привязан к {linkedChannels.length === 1 ? "каналу" : "каналам"}
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {linkedChannels.map(ch => (
-                    <Link key={ch.id} to={`/channels/${ch.id}`}>
-                      <Badge variant="outline" className="text-xs font-normal hover:border-blue-400 hover:text-blue-600 transition-colors">
-                        {ch.name}
-                      </Badge>
-                    </Link>
-                  ))}
-                </div>
-              </div>
-            )}
-            {linkedChannels.length === 0 && (
-              <div className="border-t pt-3">
-                <p className="text-xs text-gray-400">Не привязан ни к одному каналу</p>
-                <Link to="/channels" className="text-xs text-blue-500 hover:underline">
-                  Перейти к каналам →
-                </Link>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
-
       {/* ── Tabs ──────────────────────────────────────────────────────────── */}
-      <Tabs defaultValue="items" className="space-y-5">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-5">
         <div className="overflow-x-auto -mx-1 px-1">
           <TabsList className="w-max sm:w-fit">
+            <TabsTrigger value="overview" className="gap-1.5">
+              <LayoutDashboard className="size-3.5" />
+              Обзор
+            </TabsTrigger>
             <TabsTrigger value="items" className="gap-1.5">
               <FileText className="size-3.5" />
               Контент
-              {sourceItems.length > 0 && (
-                <span className="ml-1 bg-gray-200 text-gray-600 text-xs rounded-full px-1.5 py-0 leading-5">
-                  {sourceItems.length}
+              {countAll > 0 && (
+                <span className="ml-0.5 text-xs font-medium leading-5 text-gray-500">
+                  {countAll}
                 </span>
               )}
             </TabsTrigger>
             <TabsTrigger value="published" className="gap-1.5">
               <Newspaper className="size-3.5" />
               Публикации
-              {publishedFromSource.length > 0 && (
-                <span className="ml-1 bg-gray-200 text-gray-600 text-xs rounded-full px-1.5 py-0 leading-5">
-                  {publishedFromSource.length}
+              {(sourcePostsSummaryResult?.total ?? 0) > 0 && (
+                <span className="ml-0.5 text-xs font-medium leading-5 text-gray-500">
+                  {sourcePostsSummaryResult?.total ?? 0}
                 </span>
               )}
             </TabsTrigger>
             <TabsTrigger value="jobs" className="gap-1.5">
               <Activity className="size-3.5" />
               Задачи
-              {sourceJobs.length > 0 && (
-                <span className="ml-1 bg-gray-200 text-gray-600 text-xs rounded-full px-1.5 py-0 leading-5">
-                  {sourceJobs.length}
+              {(sourceJobsSummaryResult?.total ?? 0) > 0 && (
+                <span className="ml-0.5 text-xs font-medium leading-5 text-gray-500">
+                  {sourceJobsSummaryResult?.total ?? 0}
                 </span>
               )}
             </TabsTrigger>
@@ -539,40 +973,370 @@ export function SourceDetailPage() {
         </div>
 
         {/* ═════════════════════════════════════════════
+            ОБЗОР
+        ═════════════════════════════════════════════ */}
+        <TabsContent value="overview" className="space-y-5">
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <Card className="overflow-hidden">
+              <div className="flex items-center gap-2 px-5 pt-4 pb-1">
+                <div className="flex size-7 items-center justify-center rounded-md bg-blue-50">
+                  <FileText className="size-3.5 text-blue-500" />
+                </div>
+                <span className="text-sm font-semibold text-gray-700">Материалы</span>
+              </div>
+              <CardContent className="pt-3 pb-4">
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-border divide-x divide-y divide-border">
+                  {[
+                    { label: "Сегодня", value: source.itemsCount24h },
+                    { label: "Неделя", value: source.itemsCountWeek },
+                    { label: "Месяц", value: source.itemsCountMonth },
+                    { label: "Всего", value: source.itemsCount },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="flex flex-col items-center justify-center bg-card px-2 py-3 transition-colors hover:bg-muted/40">
+                      <span className="text-2xl font-bold leading-none tabular-nums text-foreground">{value}</span>
+                      <span className="mt-1 text-xs text-muted-foreground">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="overflow-hidden">
+              <div className="flex items-center gap-2 px-5 pt-4 pb-1">
+                <div className="flex size-7 items-center justify-center rounded-md bg-green-50">
+                  <Newspaper className="size-3.5 text-green-500" />
+                </div>
+                <span className="text-sm font-semibold text-gray-700">Публикации</span>
+              </div>
+              <CardContent className="pt-3 pb-4">
+                <div className="grid grid-cols-2 overflow-hidden rounded-xl border border-border divide-x divide-y divide-border">
+                  {[
+                    { label: "Сегодня", value: pubsToday },
+                    { label: "Неделя", value: pubsWeek },
+                    { label: "Всего", value: sourcePostsSummaryResult?.total ?? 0 },
+                    { label: "Задач", value: sourceJobsSummaryResult?.total ?? 0 },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="flex flex-col items-center justify-center bg-card px-2 py-3 transition-colors hover:bg-muted/40">
+                      <span className="text-2xl font-bold leading-none tabular-nums text-foreground">{value}</span>
+                      <span className="mt-1 text-xs text-muted-foreground">{label}</span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Статус источника</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-1">
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                      {source.type === "telegram"
+                        ? <Send className="size-3.5 text-muted-foreground" />
+                        : source.type === "rss"
+                          ? <Rss className="size-3.5 text-muted-foreground" />
+                          : <Globe className="size-3.5 text-muted-foreground" />}
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Тип</p>
+                      <p className="text-sm font-medium text-foreground">{SOURCE_TYPE_LABEL[source.type]}</p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <Activity className="size-3.5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Состояние</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {!localIsActive ? "Остановлен" : source.status === "error" ? "Ошибка" : "Активен"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <Clock className="size-3.5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Последнее обновление</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {source.lastFetchedAt
+                          ? new Date(source.lastFetchedAt).toLocaleString("ru-RU", {
+                              day: "numeric",
+                              month: "short",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "Никогда"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <Database className="size-3.5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Каналы</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {linkedChannels.length > 0 ? `${linkedChannels.length} шт.` : "Не привязан"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2.5 border-t pt-3 sm:col-span-2 lg:col-span-1">
+                    <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted">
+                      <CheckCircle className="size-3.5 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Создан</p>
+                      <p className="text-sm font-medium text-foreground">
+                        {new Date(source.createdAt).toLocaleString("ru-RU", {
+                          day: "numeric",
+                          month: "short",
+                          year: "numeric",
+                        })}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+
+          <Card>
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Database className="size-4 text-green-500" />
+                  <CardTitle className="text-base">Каналы источника</CardTitle>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {linkedChannels.length === 0 ? (
+                <div className="py-6 text-center text-sm text-gray-400">
+                  <Database className="mx-auto mb-2 size-8 text-gray-200" />
+                  Источник пока не привязан ни к одному каналу.
+                </div>
+              ) : (
+                <div>
+                  <div className="space-y-2 sm:hidden">
+                    {linkedChannels.map((channel) => (
+                      <Link key={channel.id} to={`/channels/${channel.id}`} className="block">
+                        <div className="flex items-center justify-between gap-2 rounded-lg border border-border/70 px-3 py-2 transition-colors hover:bg-muted/30">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium text-foreground">{channel.name}</div>
+                            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                              <span>{channel.telegramUsername ? `@${channel.telegramUsername.replace(/^@/, "")}` : channel.telegramTarget}</span>
+                              <span>·</span>
+                              <span>{channelPublicationCounts.get(channel.id) ?? 0} публ.</span>
+                            </div>
+                          </div>
+                          <ChevronRight className="size-4 shrink-0 text-gray-300" />
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                  <div className="hidden sm:block">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border">
+                          <th className="pb-2 pr-4 text-left text-xs font-normal text-muted-foreground">Канал</th>
+                          <th className="pb-2 pr-4 text-left text-xs font-normal text-muted-foreground">Telegram</th>
+                          <th className="pb-2 pr-4 text-right text-xs font-normal text-muted-foreground">Публ.</th>
+                          <th className="pb-2 text-right text-xs font-normal text-muted-foreground">Статус</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-50">
+                        {linkedChannels.map((channel) => (
+                          <tr key={channel.id}>
+                            <td className="py-2.5 pr-4">
+                              <Link to={`/channels/${channel.id}`} className="font-medium hover:text-blue-600">
+                                {channel.name}
+                              </Link>
+                            </td>
+                            <td className="py-2.5 pr-4 text-gray-500">
+                          {channel.telegramUsername ? `@${channel.telegramUsername.replace(/^@/, "")}` : channel.telegramTarget}
+                            </td>
+                            <td className="py-2.5 pr-4 text-right tabular-nums font-medium text-blue-600">
+                              {channelPublicationCounts.get(channel.id) ?? 0}
+                            </td>
+                            <td className="py-2.5 text-right">
+                              <Badge variant={channel.isActive ? "default" : "secondary"} className="text-xs">
+                                {channel.isActive ? "Активен" : "Остановлен"}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-base">Последние материалы</CardTitle>
+                  {countAll > OVERVIEW_ITEMS_COUNT && (
+                    <Button variant="ghost" size="sm" className="h-7 text-xs text-blue-600" onClick={() => setActiveTab("items")}>
+                      Смотреть все →
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                {overviewItems.length === 0 ? (
+                  <div className="py-8 text-center text-sm text-muted-foreground">Материалы пока не собраны</div>
+                ) : (
+                  <div className="space-y-3">
+                    {overviewItems.map((item) => (
+                      <Link key={item.id} to={`/items/${item.id}`}>
+                        <div className="group rounded-xl border border-border/70 bg-card px-4 py-3 transition-colors hover:bg-muted/25">
+                          <div className="flex gap-3">
+                            {item.mediaUrl && item.mediaPreviewAvailable !== false ? (
+                              <img src={item.mediaUrl} alt="" className="mt-0.5 h-14 w-14 shrink-0 rounded-lg object-cover" />
+                            ) : (
+                              <div className="mt-0.5 flex h-14 w-14 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                                <FileText className="size-4" />
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-1 flex items-center gap-2 text-xs text-gray-400">
+                                <span className="rounded-md bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+                                  Материал
+                                </span>
+                                <span className="tabular-nums">
+                                  {new Date(item.extractedAt).toLocaleString("ru-RU", {
+                                    day: "numeric",
+                                    month: "short",
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  })}
+                                </span>
+                                {(item.publicationsCount ?? 0) > 0 && (
+                                  <>
+                                    <span>·</span>
+                                    <span>{item.publicationsCount} публ.</span>
+                                  </>
+                                )}
+                              </div>
+                              <div className="line-clamp-2 text-sm font-semibold leading-5 text-foreground group-hover:text-blue-600">
+                                {item.title}
+                              </div>
+                              <div className="mt-1.5 line-clamp-2 text-xs leading-5 text-muted-foreground">
+                                {item.content}
+                              </div>
+                              <MediaStatusHint item={item} className="mt-2" />
+                            </div>
+                          </div>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-base">Последние публикации</CardTitle>
+                  {(sourcePostsSummaryResult?.total ?? 0) > OVERVIEW_POSTS_COUNT && (
+                    <Button variant="ghost" size="sm" className="h-7 text-xs text-blue-600" onClick={() => setActiveTab("published")}>
+                      Смотреть все →
+                    </Button>
+                  )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                {overviewPublished.length === 0 ? (
+                  <div className="py-8 text-center text-sm text-muted-foreground">Публикаций пока нет</div>
+                ) : (
+                  <div className="space-y-3">
+                    {overviewPublished.map((publication) => (
+                      <Link key={publication.id} to={`/posts/${publication.id}`}>
+                        <div className="group rounded-xl border border-border/70 bg-card px-4 py-3 transition-colors hover:bg-muted/25">
+                          <div className="mb-2 flex items-center gap-2 text-xs text-gray-400">
+                            <Badge variant="default" className="text-xs">{publication.channelName}</Badge>
+                            <span className="tabular-nums">
+                              {new Date(publication.postedAt).toLocaleString("ru-RU", {
+                                day: "numeric",
+                                month: "short",
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </span>
+                          </div>
+                          <div className="line-clamp-3 text-sm leading-5 text-foreground group-hover:text-blue-600">
+                            {publication.generatedContent}
+                          </div>
+                          <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-gray-400">
+                            <span className="text-muted-foreground italic line-clamp-1">
+                              {publication.itemTitle}
+                            </span>
+                            {(publication.views !== undefined || publication.reactions !== undefined) && (
+                              <>
+                                <span className="flex items-center gap-1">
+                                  <Eye className="size-3" />
+                                  {publication.views?.toLocaleString("ru-RU") ?? "—"}
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <Heart className="size-3" />
+                                  {publication.reactions?.toLocaleString("ru-RU") ?? "—"}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ═════════════════════════════════════════════
             КОНТЕНТ
-        ═════════════════��════════════════════════════ */}
+        ═════════════════════════════════════════════ */}
         <TabsContent value="items" className="space-y-4">
           {/* Filter bar */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
+            <div className="flex flex-wrap items-start gap-3 sm:items-center">
               <div className="flex items-center gap-2">
                 <Filter className="size-3.5 text-gray-400" />
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
                   {itemPublishFilterOptions.map(({ value, label, count }) => (
                     <button
                       key={value}
                       onClick={() => handleItemPublishFilter(value)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                      className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
                         itemPublishFilter === value
-                          ? "bg-gray-900 text-white"
-                          : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                          ? "bg-foreground text-background shadow-sm"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
                       }`}
                     >
                       {label}
-                      <span className={`text-xs tabular-nums ${itemPublishFilter === value ? "text-gray-300" : "text-gray-400"}`}>
+                      <span className={`text-xs tabular-nums ${itemPublishFilter === value ? "opacity-70" : "text-muted-foreground"}`}>
                         {count}
                       </span>
                     </button>
                   ))}
                 </div>
               </div>
-              <div className="h-5 w-px bg-gray-200" />
+              <div className="hidden h-5 w-px bg-border sm:block" />
               <PeriodPicker value={itemDateFilter} onChange={handleItemDateFilter} />
             </div>
             {(itemPublishFilter !== "all" || itemDateFilter !== undefined) && (
               <button
                 onClick={() => { setItemPublishFilter("all"); setItemDateFilter(undefined); setItemsPage(1); }}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
               >
                 Сбросить
               </button>
@@ -580,41 +1344,42 @@ export function SourceDetailPage() {
           </div>
 
           {filteredItems.length === 0 ? (
-            <div className="rounded-lg border bg-white py-12 text-center text-gray-400">
-              <FileText className="size-10 mx-auto mb-3 text-gray-200" />
+            <div className="rounded-lg border border-border bg-card py-12 text-center text-muted-foreground">
+              <FileText className="mx-auto mb-3 size-10 text-muted-foreground" />
               <p className="text-sm">
-                {sourceItems.length === 0
+                {countAll === 0
                   ? "Материалы пока не собраны — запустите получение"
                   : "Нет материалов с выбранным фильтром"}
               </p>
             </div>
           ) : (
-            <div className="bg-white rounded-lg border divide-y">
+            <div className="rounded-lg border border-border bg-card divide-y">
               {pageItems.map((item) => {
-                const pubs = getPublicationsForItem(item.id);
-                const isPublished = pubs.length > 0;
+                const pubs = item.publicationsPreview ?? [];
+                const publicationsCount = item.publicationsCount ?? pubs.length;
+                const isPublished = publicationsCount > 0;
                 return (
                   <div
                     key={item.id}
-                    className="flex items-start gap-4 px-4 py-4 hover:bg-gray-50/80 transition-colors cursor-pointer"
+                    className="flex cursor-pointer items-start gap-4 px-4 py-4 transition-colors hover:bg-muted/40"
                     onClick={() => navigate(`/items/${item.id}`)}
                   >
-                    {item.mediaUrl && (
+                    {item.mediaUrl && item.mediaPreviewAvailable !== false && (
                       <img src={item.mediaUrl} alt="" className="w-14 h-14 object-cover rounded-lg flex-shrink-0" />
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-3 mb-1.5">
-                        <h3 className="font-medium text-sm text-gray-900 leading-snug line-clamp-1">{item.title}</h3>
+                        <h3 className="line-clamp-1 text-sm font-medium leading-snug text-foreground">{item.title}</h3>
                         {isPublished ? (
                           <Badge variant="default" className="text-xs flex-shrink-0 gap-1">
                             <CheckCircle className="size-3" />
-                            {pubs.length > 1 ? `${pubs.length} канала` : "Опубликован"}
+                            {publicationsCount > 1 ? `${publicationsCount} канала` : "Опубликован"}
                           </Badge>
                         ) : (
                           <Badge variant="secondary" className="text-xs flex-shrink-0">Не опубликован</Badge>
                         )}
                       </div>
-                      <p className="text-sm text-gray-500 line-clamp-2 mb-2">{item.content}</p>
+                        <p className="mb-2 line-clamp-2 text-sm text-muted-foreground">{item.content}</p>
                       {pubs.length > 0 && (
                         <div className="flex flex-wrap gap-1.5 mb-2">
                           {pubs.map(pub => (
@@ -634,6 +1399,7 @@ export function SourceDetailPage() {
                           day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                         })}
                       </span>
+                      <MediaStatusHint item={item} className="mt-2" />
                     </div>
                   </div>
                 );
@@ -655,8 +1421,8 @@ export function SourceDetailPage() {
         ══════════════════════════════════════════════ */}
         <TabsContent value="published" className="space-y-4">
           {/* Filter bar */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
+            <div className="flex flex-wrap items-start gap-3 sm:items-center">
               <Filter className="size-3.5 text-gray-400" />
               {pubChannelOptions.length > 0 && (
                 <Select value={pubsChannelFilter} onValueChange={handlePubsChannelFilter}>
@@ -688,7 +1454,7 @@ export function SourceDetailPage() {
             <div className="rounded-lg border bg-white py-12 text-center text-gray-400">
               <Newspaper className="size-10 mx-auto mb-3 text-gray-200" />
               <p className="text-sm">
-                {publishedFromSource.length === 0
+                {(sourcePostsSummaryResult?.total ?? 0) === 0
                   ? "Посты из этого источника ещё не публиковались"
                   : "Нет публикаций с выбранным фильтром"}
               </p>
@@ -705,7 +1471,7 @@ export function SourceDetailPage() {
                           <CheckCircle className="size-3" />
                           {pi.channelName}
                         </Badge>
-                        <span className="text-xs text-gray-400 tabular-nums">
+                        <span className="text-xs text-muted-foreground tabular-nums">
                           {new Date(pi.postedAt).toLocaleString("ru-RU", {
                             day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                           })}
@@ -744,13 +1510,14 @@ export function SourceDetailPage() {
                     </div>
                   </div>
                   {/* Media + Generated content */}
-                  {pi.mediaUrl && (
+                  {pi.mediaUrl && pi.mediaPreviewAvailable !== false && (
                     <img
                       src={pi.mediaUrl}
                       alt=""
                       className="w-full max-h-64 object-cover rounded-lg"
                     />
                   )}
+                  <MediaStatusHint item={pi} />
                   <div className="bg-gray-50 rounded-lg px-3 py-2.5 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
                     {pi.generatedContent}
                   </div>
@@ -770,29 +1537,29 @@ export function SourceDetailPage() {
 
         {/* ══════════════════════════════════════════════
             ЗАДАЧИ
-        ══════���══════��════════════════════════════════ */}
+        ══════════════════════════════════════════════ */}
         <TabsContent value="jobs" className="space-y-4">
           {/* Filter bar */}
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <div className="flex items-center gap-3 flex-wrap">
+          <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
+            <div className="flex flex-wrap items-start gap-3 sm:items-center">
               <div className="flex items-center gap-2">
                 <Filter className="size-3.5 text-gray-400" />
-                <div className="flex items-center gap-1">
+                <div className="flex flex-wrap items-center gap-1 sm:flex-nowrap">
                   {jobStatusOptions.map(({ value, label }) => {
-                    const cnt = value === "all" ? sourceJobs.length : (jobStatusCounts[value] ?? 0);
+                    const cnt = value === "all" ? (sourceJobsSummaryResult?.total ?? 0) : (jobStatusCounts[value] ?? 0);
                     if (value !== "all" && cnt === 0) return null;
                     return (
                       <button
                         key={value}
                         onClick={() => handleJobStatusFilter(value)}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
+                        className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
                           jobStatusFilter === value
-                            ? "bg-gray-900 text-white"
-                            : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                            ? "bg-foreground text-background shadow-sm"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground"
                         }`}
                       >
                         {label}
-                        <span className={`text-xs tabular-nums ${jobStatusFilter === value ? "text-gray-300" : "text-gray-400"}`}>
+                        <span className={`text-xs tabular-nums ${jobStatusFilter === value ? "opacity-70" : "text-muted-foreground"}`}>
                           {cnt}
                         </span>
                       </button>
@@ -800,13 +1567,13 @@ export function SourceDetailPage() {
                   })}
                 </div>
               </div>
-              <div className="h-5 w-px bg-gray-200" />
+              <div className="h-5 w-px bg-border" />
               <PeriodPicker value={jobDateFilter} onChange={handleJobDateFilter} />
             </div>
             {(jobStatusFilter !== "all" || jobDateFilter !== undefined) && (
               <button
                 onClick={() => { setJobStatusFilter("all"); setJobDateFilter(undefined); setJobsPage(1); }}
-                className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground"
               >
                 Сбросить
               </button>
@@ -814,28 +1581,28 @@ export function SourceDetailPage() {
           </div>
 
           {filteredJobs.length === 0 ? (
-            <div className="rounded-lg border bg-white py-12 text-center text-gray-400">
-              <Activity className="size-10 mx-auto mb-3 text-gray-200" />
+            <div className="rounded-lg border border-border bg-card py-12 text-center text-muted-foreground">
+              <Activity className="mx-auto mb-3 size-10 text-muted-foreground" />
               <p className="text-sm">
-                {sourceJobs.length === 0 ? "Заач не найдено" : "Нет задач с выбранным фильтром"}
+                {(sourceJobsSummaryResult?.total ?? 0) === 0 ? "Заач не найдено" : "Нет задач с выбранным фильтром"}
               </p>
             </div>
           ) : (
-            <div className="bg-white rounded-lg border divide-y">
+            <div className="rounded-lg border border-border bg-card divide-y">
               {pageJobs.map((job) => (
                 <div
                   key={job.id}
-                  className="flex items-center justify-between gap-4 px-4 py-3.5 hover:bg-gray-50/80 transition-colors cursor-pointer"
+                  className="flex cursor-pointer items-center justify-between gap-4 px-4 py-3.5 transition-colors hover:bg-muted/40"
                   onClick={() => navigate(`/jobs/${job.id}`)}
                 >
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-0.5 flex-wrap">
-                      <span className="font-medium text-sm text-gray-900">
+                      <span className="text-sm font-medium text-foreground">
                         {job.type.replace(/_/g, " ")}
                       </span>
                       <JobStatusBadge status={job.status} />
                     </div>
-                    <span className="text-xs text-gray-400 tabular-nums">
+                      <span className="text-xs text-muted-foreground tabular-nums">
                       {new Date(job.createdAt).toLocaleString("ru-RU", {
                         day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
                       })}
@@ -856,10 +1623,112 @@ export function SourceDetailPage() {
           />
         </TabsContent>
 
-        {/* ════════��═════════════════════════════════════
+        {/* ══════════════════════════════════════════════
             НАСТРОЙКА
         ══════════════════════════════════════════════ */}
         <TabsContent value="actions" className="space-y-5">
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Основные настройки</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="source-name">Название источника</Label>
+                  <Input
+                    id="source-name"
+                    value={sourceNameDraft}
+                    onChange={(event) => setSourceNameDraft(event.target.value)}
+                    placeholder="Введите название"
+                    disabled={isSavingSourceSettings}
+                  />
+                  <p className="text-xs text-gray-500">
+                    Это название отображается в списке источников, задачах и публикациях.
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="source-scan-interval-mode">{"\u0418\u043D\u0442\u0435\u0440\u0432\u0430\u043B \u0441\u043A\u0430\u043D\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u044F"}</Label>
+                  <Select
+                    value={sourceScanIntervalMode}
+                    onValueChange={(value: "default" | "custom") => setSourceScanIntervalMode(value)}
+                    disabled={isSavingSourceSettings}
+                  >
+                    <SelectTrigger id="source-scan-interval-mode">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="default">{"\u041E\u0442 \u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u043E\u0433\u043E scheduler"}</SelectItem>
+                      <SelectItem value="custom">{"\u0421\u0432\u043E\u0439 \u0438\u043D\u0442\u0435\u0440\u0432\u0430\u043B"}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {sourceScanIntervalMode === "custom" && (
+                    <div className="space-y-2 rounded-lg border border-border/70 bg-muted/30 p-3">
+                      <Label htmlFor="source-scan-interval-value">{"\u041A\u0430\u0436\u0434\u044B\u0435"}</Label>
+                      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_180px]">
+                        <NumericInput
+                          id="source-scan-interval-value"
+                          value={sourceScanIntervalDraft}
+                          onValueChange={setSourceScanIntervalDraft}
+                          min={sourceSettingsMinScanIntervalDraft}
+                          max={sourceSettingsMaxScanIntervalDraft}
+                          step={1}
+                          fallbackValue={sourceSettingsMinScanIntervalDraft}
+                          disabled={isSavingSourceSettings}
+                        />
+                        <Select
+                          value={sourceScanIntervalUnitDraft}
+                          onValueChange={(value: SourceScanIntervalUnit) => {
+                            const currentIntervalSec = toScanIntervalSec(
+                              sourceScanIntervalDraft,
+                              sourceScanIntervalUnitDraft,
+                              sourceSettingsMinScanIntervalSec,
+                              sourceSettingsMaxScanIntervalSec,
+                            );
+                            setSourceScanIntervalUnitDraft(value);
+                            setSourceScanIntervalDraft(
+                              clampScanIntervalDraftAmount(
+                                getScanIntervalDraftAmount(currentIntervalSec, value),
+                                value,
+                                sourceSettingsMinScanIntervalSec,
+                                sourceSettingsMaxScanIntervalSec,
+                              ),
+                            );
+                          }}
+                          disabled={isSavingSourceSettings}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="minutes">{"\u043C\u0438\u043D\u0443\u0442"}</SelectItem>
+                            <SelectItem value="hours">{"\u0447\u0430\u0441\u043E\u0432"}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500">
+                    {"\u041C\u0438\u043D\u0438\u043C\u0443\u043C: "}
+                    {formatIntervalLabel(sourceSettingsMinScanIntervalSec)}
+                    {". "}
+                    {"\u041C\u0430\u043A\u0441\u0438\u043C\u0443\u043C: "}
+                    {formatIntervalLabel(sourceSettingsMaxScanIntervalSec)}
+                    {". "}
+                    {"\u0421\u0435\u0439\u0447\u0430\u0441 \u044D\u0444\u0444\u0435\u043A\u0442\u0438\u0432\u043D\u043E: "}
+                    {formatIntervalLabel(sourceSettingsEffectiveScanIntervalSec)}
+                    {"."}
+                  </p>
+                </div>
+                <div className="flex justify-end">
+                  <Button
+                    onClick={handleSaveSourceSettings}
+                    disabled={isSavingSourceSettings || !sourceNameDraft.trim() || !hasSourceSettingsChanges}
+                  >
+                    <Save className="mr-2 size-4" />
+                    {isSavingSourceSettings ? "Сохранение..." : "Сохранить настройки"}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
 
             {/* ── Current config ── */}
             {(source.type === "website" || source.type === "rss") && (
@@ -881,47 +1750,48 @@ export function SourceDetailPage() {
             {source.type === "website" && (
               <Card>
                 <CardContent className="py-4 space-y-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-3">
                     <span className="text-sm font-medium text-gray-700">Конфигурация парсера</span>
+                    {source.activeConfigJson && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setConfigExpanded((value) => !value)}
+                      >
+                        {configExpanded ? "Свернуть полный конфиг" : "Развернуть полный конфиг"}
+                      </Button>
+                    )}
                   </div>
                   {source.activeConfigJson ? (
+                    <div className="space-y-3">
                     <div className="bg-gray-50 rounded-lg p-3 font-mono text-xs space-y-2">
-                      <div className="flex items-start gap-2">
-                        <span className="text-purple-600 shrink-0 min-w-[140px]">kind:</span>
-                        <span className="text-gray-700">{source.activeConfigJson.kind}</span>
-                      </div>
+                      <ConfigSummaryRow label="kind" value={source.activeConfigJson.kind} />
                       {source.activeConfigJson.kind === 'website_full' && (
                         <>
-                          {source.activeConfigJson.list.itemSelectors.map((sel, i) => (
-                            <div key={`list-${i}`} className="flex items-start gap-2">
-                              <span className="text-purple-600 shrink-0 min-w-[140px]">list.itemSelectors[{i}]:</span>
-                              <span className="text-gray-700 break-all">{sel}</span>
-                            </div>
+                          {source.activeConfigJson.list.itemSelectors.slice(0, 2).map((sel, i) => (
+                            <ConfigSummaryRow key={`list-${i}`} label={`list.itemSelectors[${i}]`} value={sel} />
                           ))}
-                          {source.activeConfigJson.list.linkSelectors.map((sel, i) => (
-                            <div key={`link-${i}`} className="flex items-start gap-2">
-                              <span className="text-purple-600 shrink-0 min-w-[140px]">list.linkSelectors[{i}]:</span>
-                              <span className="text-gray-700 break-all">{sel}</span>
-                            </div>
+                          {source.activeConfigJson.list.linkSelectors.slice(0, 2).map((sel, i) => (
+                            <ConfigSummaryRow key={`link-${i}`} label={`list.linkSelectors[${i}]`} value={sel} />
                           ))}
                         </>
                       )}
-                      {source.activeConfigJson.article.titleSelectors.map((sel, i) => (
-                        <div key={`title-${i}`} className="flex items-start gap-2">
-                          <span className="text-purple-600 shrink-0 min-w-[140px]">article.titleSelectors[{i}]:</span>
-                          <span className="text-gray-700 break-all">{sel}</span>
-                        </div>
+                      {source.activeConfigJson.article.titleSelectors.slice(0, 2).map((sel, i) => (
+                        <ConfigSummaryRow key={`title-${i}`} label={`article.titleSelectors[${i}]`} value={sel} />
                       ))}
-                      {source.activeConfigJson.article.contentSelectors.map((sel, i) => (
-                        <div key={`content-${i}`} className="flex items-start gap-2">
-                          <span className="text-purple-600 shrink-0 min-w-[140px]">article.contentSelectors[{i}]:</span>
-                          <span className="text-gray-700 break-all">{sel}</span>
-                        </div>
+                      {source.activeConfigJson.article.contentSelectors.slice(0, 2).map((sel, i) => (
+                        <ConfigSummaryRow key={`content-${i}`} label={`article.contentSelectors[${i}]`} value={sel} />
                       ))}
-                      <div className="flex items-start gap-2">
-                        <span className="text-purple-600 shrink-0 min-w-[140px]">quality.minContentChars:</span>
-                        <span className="text-gray-700">{source.activeConfigJson.quality.minContentChars}</span>
+                      <ConfigSummaryRow label="quality.minContentChars" value={String(source.activeConfigJson.quality.minContentChars)} />
+                    </div>
+                    {configExpanded && (
+                      <div className="grid gap-3 lg:grid-cols-2">
+                        <ConfigFullView title="List" payload={source.activeConfigJson.kind === 'website_full' ? source.activeConfigJson.list : {}} />
+                        <ConfigFullView title="Article" payload={source.activeConfigJson.article} />
+                        <ConfigFullView title="Quality" payload={source.activeConfigJson.quality} />
+                        <ConfigFullView title="Raw config" payload={source.activeConfigJson} />
                       </div>
+                    )}
                     </div>
                   ) : (
                     <div className="bg-amber-50 rounded-lg p-3 text-xs text-amber-700">
@@ -948,7 +1818,7 @@ export function SourceDetailPage() {
                       <div className="flex items-center gap-2">
                         {source.rssMode === 'feed_with_article_agent' ? (
                           <Badge variant="outline" className="text-[10px] border-purple-300 text-purple-600">
-                            <Bot className="size-3 mr-0.5" /> RSS + HTML
+                            <Bot className="size-3 mr-0.5" /> Article-first
                           </Badge>
                         ) : (
                           <Badge variant="outline" className="text-[10px] border-orange-300 text-orange-600">
@@ -971,21 +1841,17 @@ export function SourceDetailPage() {
                         { key: "etag", value: source.etag || "—" },
                         { key: "lastModified", value: source.lastModified || "—" },
                       ].map(({ key, value }) => (
-                        <div key={key} className="flex items-start gap-2">
-                          <span className="text-orange-600 shrink-0 min-w-[150px]">{key}:</span>
+                        <div key={key} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+                          <span className="w-full text-orange-600 sm:w-auto sm:min-w-[150px] sm:shrink-0">{key}:</span>
                           <span className="text-gray-700 break-all">{value}</span>
                         </div>
                       ))}
                       {source.rssMode === 'feed_with_article_agent' && source.rssArticleConfig && (
                         <>
                           <div className="border-t border-gray-200 my-1" />
-                          <div className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">minFeedContentChars:</span>
+                          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+                            <span className="w-full text-purple-600 sm:w-auto sm:min-w-[150px] sm:shrink-0">minFeedContentChars:</span>
                             <span className="text-gray-700">{source.rssArticleConfig.rssFallbackPolicy.minFeedContentChars}</span>
-                          </div>
-                          <div className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">preferFeedWhenFull:</span>
-                            <span className="text-gray-700">{source.rssArticleConfig.rssFallbackPolicy.preferFeedWhenFull ? 'true' : 'false'}</span>
                           </div>
                         </>
                       )}
@@ -1003,44 +1869,44 @@ export function SourceDetailPage() {
                 {source.rssMode === 'feed_with_article_agent' && source.rssArticleConfig && (
                   <Card>
                     <CardContent className="py-4 space-y-3">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-3">
                         <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
                           <Bot className="size-3.5 text-purple-500" />
                           Article parser config
                         </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setRssConfigExpanded((value) => !value)}
+                        >
+                          {rssConfigExpanded ? "Свернуть полный конфиг" : "Развернуть полный конфиг"}
+                        </Button>
                       </div>
 
-                      <div className="bg-purple-50 rounded-lg p-3 font-mono text-xs space-y-2 border border-purple-100">
-                        <div className="text-purple-700 font-medium text-[11px] mb-1">rss_article_only</div>
-                        {source.rssArticleConfig.article.titleSelectors.map((sel, i) => (
-                          <div key={`rss-title-${i}`} className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">titleSelectors[{i}]:</span>
-                            <span className="text-gray-700 break-all">{sel}</span>
-                          </div>
+                      <div className="rounded-lg border border-purple-100 bg-purple-50 p-3 font-mono text-xs space-y-2 dark:border-purple-800/50 dark:bg-purple-950/20">
+                        <div className="mb-1 text-[11px] font-medium text-purple-700 dark:text-purple-300">rss_article_only</div>
+                        {source.rssArticleConfig.article.titleSelectors.slice(0, 2).map((sel, i) => (
+                          <ConfigSummaryRow key={`rss-title-${i}`} label={`titleSelectors[${i}]`} value={sel} />
                         ))}
-                        {source.rssArticleConfig.article.contentSelectors.map((sel, i) => (
-                          <div key={`rss-content-${i}`} className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">contentSelectors[{i}]:</span>
-                            <span className="text-gray-700 break-all">{sel}</span>
-                          </div>
+                        {source.rssArticleConfig.article.contentSelectors.slice(0, 2).map((sel, i) => (
+                          <ConfigSummaryRow key={`rss-content-${i}`} label={`contentSelectors[${i}]`} value={sel} />
                         ))}
-                        {source.rssArticleConfig.article.dateSelectors.map((sel, i) => (
-                          <div key={`rss-date-${i}`} className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">dateSelectors[{i}]:</span>
-                            <span className="text-gray-700 break-all">{sel}</span>
-                          </div>
+                        {source.rssArticleConfig.article.dateSelectors.slice(0, 2).map((sel, i) => (
+                          <ConfigSummaryRow key={`rss-date-${i}`} label={`dateSelectors[${i}]`} value={sel} />
                         ))}
-                        {source.rssArticleConfig.article.mediaSelectors?.map((sel, i) => (
-                          <div key={`rss-media-${i}`} className="flex items-start gap-2">
-                            <span className="text-purple-600 shrink-0 min-w-[150px]">mediaSelectors[{i}]:</span>
-                            <span className="text-gray-700 break-all">{sel}</span>
-                          </div>
+                        {source.rssArticleConfig.article.mediaSelectors?.slice(0, 2).map((sel, i) => (
+                          <ConfigSummaryRow key={`rss-media-${i}`} label={`mediaSelectors[${i}]`} value={sel} />
                         ))}
-                        <div className="flex items-start gap-2">
-                          <span className="text-purple-600 shrink-0 min-w-[150px]">quality.minChars:</span>
-                          <span className="text-gray-700">{source.rssArticleConfig.quality.minContentChars}</span>
-                        </div>
+                        <ConfigSummaryRow label="quality.minChars" value={String(source.rssArticleConfig.quality.minContentChars)} />
                       </div>
+                      {rssConfigExpanded && (
+                        <div className="grid gap-3 lg:grid-cols-2">
+                          <ConfigFullView title="Article" payload={source.rssArticleConfig.article} />
+                          <ConfigFullView title="Quality" payload={source.rssArticleConfig.quality} />
+                          <ConfigFullView title="RSS fallback" payload={{ minFeedContentChars: source.rssArticleConfig.rssFallbackPolicy.minFeedContentChars }} />
+                          <ConfigFullView title="Raw config" payload={source.rssArticleConfig} />
+                        </div>
+                      )}
 
                       {source.rssArticleOnboardedAt && (
                         <div className="flex items-center gap-4 text-xs text-gray-400">
@@ -1091,35 +1957,7 @@ export function SourceDetailPage() {
                             </div>
                             <Button
                               className="shrink-0"
-                              onClick={async () => {
-                                setRssAgentRunning(true);
-                                setRssAgentDone(false);
-                                setRssAgentNewConfig(null);
-                                const result = await sourceService.reonboardRssArticle(source.id, currentTeamId!);
-                                if (result.ok) setRssAgentJob(result.data);
-                                setTimeout(() => {
-                                  const currentVer = source.rssArticleConfig?.version ?? 0;
-                                  setRssAgentRunning(false);
-                                  setRssAgentDone(true);
-                                  setRssAgentNewConfig({
-                                    kind: 'rss_article_only',
-                                    version: currentVer + 1,
-                                    article: {
-                                      titleSelectors: ['h1.entry-title', "meta[property='og:title']"],
-                                      contentSelectors: ['div.entry-content', 'article .post-body'],
-                                      dateSelectors: ['time[datetime]', "meta[property='article:published_time']"],
-                                      mediaSelectors: ["meta[property='og:image']", 'figure.hero-image img'],
-                                      idSelectors: ["meta[name='article:id']", 'article[data-post-id]'],
-                                      canonicalSelectors: ["link[rel='canonical']", "meta[property='og:url']"],
-                                    },
-                                    quality: { minContentChars: 400 },
-                                    rssFallbackPolicy: {
-                                      minFeedContentChars: source.rssArticleConfig?.rssFallbackPolicy.minFeedContentChars ?? 700,
-                                      preferFeedWhenFull: source.rssArticleConfig?.rssFallbackPolicy.preferFeedWhenFull ?? true,
-                                    },
-                                  });
-                                }, 8000);
-                              }}
+                              onClick={handleRunRssAgent}
                             >
                               <Bot className="size-4 mr-1.5" />
                               Запустить
@@ -1138,9 +1976,10 @@ export function SourceDetailPage() {
                                 </p>
                               </div>
                             </div>
-                            <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                            <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
                               <div className="h-full bg-purple-500 rounded-full animate-pulse" style={{ width: "60%" }} />
                             </div>
+                            <AgentStageStepper stages={rssAgentStages} />
                           </div>
                         )}
 
@@ -1174,16 +2013,16 @@ export function SourceDetailPage() {
                               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                                 <div>
                                   <div className="text-xs font-medium text-gray-500 mb-1.5">Текущий конфиг</div>
-                                  <div className="bg-gray-50 rounded-lg p-3 font-mono text-xs space-y-1.5 border">
+                                  <div className="rounded-lg border bg-gray-50 dark:bg-gray-900/60 dark:border-gray-700 p-3 font-mono text-xs space-y-1.5">
                                     {curEntries.length === 0 ? (
-                                      <span className="text-gray-400 italic">Конфиг отсутствует</span>
+                                      <span className="text-gray-400 dark:text-gray-500 italic">Конфиг отсутствует</span>
                                     ) : allKeys.map((key) => {
                                       const val = curMap.get(key);
                                       if (!val) return null;
                                       const changed = val !== newMap.get(key);
                                       return (
-                                        <div key={key} className={`flex items-start gap-1 ${changed ? "text-red-400 line-through" : "text-gray-500"}`}>
-                                          <span className="shrink-0 min-w-[180px]">{key}:</span>
+                                        <div key={key} className={`flex flex-col gap-1 sm:flex-row sm:items-start ${changed ? "text-red-400 dark:text-red-300 line-through" : "text-gray-500 dark:text-gray-400"}`}>
+                                          <span className="w-full sm:w-auto sm:min-w-[180px] sm:shrink-0">{key}:</span>
                                           <span className="break-all">{val}</span>
                                         </div>
                                       );
@@ -1192,16 +2031,16 @@ export function SourceDetailPage() {
                                 </div>
                                 <div>
                                   <div className="text-xs font-medium text-gray-500 mb-1.5">Новый конфиг</div>
-                                  <div className="bg-purple-50 rounded-lg p-3 font-mono text-xs space-y-1.5 border border-purple-200">
+                                  <div className="rounded-lg border border-purple-200 bg-purple-50 dark:border-purple-800/50 dark:bg-purple-950/20 p-3 font-mono text-xs space-y-1.5">
                                     {allKeys.map((key) => {
                                       const val = newMap.get(key);
                                       if (!val) return null;
                                       const changed = val !== curMap.get(key);
                                       return (
-                                        <div key={key} className={`flex items-start gap-1 ${changed ? "text-purple-700 font-medium" : "text-gray-500"}`}>
-                                          <span className="shrink-0 min-w-[180px]">{key}:</span>
+                                        <div key={key} className={`flex flex-col gap-1 sm:flex-row sm:items-start ${changed ? "text-purple-700 dark:text-purple-300 font-medium" : "text-gray-500 dark:text-gray-400"}`}>
+                                          <span className="w-full sm:w-auto sm:min-w-[180px] sm:shrink-0">{key}:</span>
                                           <span className="break-all">{val}</span>
-                                          {changed && <span className="text-green-600 shrink-0 ml-auto">NEW</span>}
+                                          {changed && <span className="text-green-600 dark:text-green-400 shrink-0 sm:ml-auto">NEW</span>}
                                         </div>
                                       );
                                     })}
@@ -1212,14 +2051,7 @@ export function SourceDetailPage() {
                               <div className="flex items-center gap-2 pt-1">
                                 <Button
                                   size="sm"
-                                  onClick={() => {
-                                    const r = sourceService.applySourceRssConfig(source.id, currentTeamId!, rssAgentNewConfig);
-                                    if (!r.ok) { toast.error(r.error); return; }
-                                    setRssAgentDone(false);
-                                    setRssAgentNewConfig(null);
-                                    setRssAgentJob(null);
-                                    toast.success("Конфигурация article-парсера обновлена");
-                                  }}
+                                  onClick={handleApplyRssConfig}
                                 >
                                   <CheckCircle className="size-3.5 mr-1.5" />
                                   Применить новый
@@ -1239,40 +2071,13 @@ export function SourceDetailPage() {
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  onClick={async () => {
-                                    setRssAgentRunning(true);
-                                    setRssAgentDone(false);
-                                    setRssAgentNewConfig(null);
-                                    const result = await sourceService.reonboardRssArticle(source.id, currentTeamId!);
-                                    if (result.ok) setRssAgentJob(result.data);
-                                    setTimeout(() => {
-                                      const currentVer = source.rssArticleConfig?.version ?? 0;
-                                      setRssAgentRunning(false);
-                                      setRssAgentDone(true);
-                                      setRssAgentNewConfig({
-                                        kind: 'rss_article_only',
-                                        version: currentVer + 1,
-                                        article: {
-                                          titleSelectors: ['h1', "meta[property='og:title']"],
-                                          contentSelectors: ['main article', '.post-body'],
-                                          dateSelectors: ['time[datetime]'],
-                                          mediaSelectors: ["meta[property='og:image']"],
-                                          idSelectors: ['article[data-id]'],
-                                          canonicalSelectors: ["link[rel='canonical']"],
-                                        },
-                                        quality: { minContentChars: 300 },
-                                        rssFallbackPolicy: {
-                                          minFeedContentChars: source.rssArticleConfig?.rssFallbackPolicy.minFeedContentChars ?? 700,
-                                          preferFeedWhenFull: source.rssArticleConfig?.rssFallbackPolicy.preferFeedWhenFull ?? true,
-                                        },
-                                      });
-                                    }, 8000);
-                                  }}
+                                  onClick={handleRunRssAgent}
                                 >
                                   <RefreshCw className="size-3.5 mr-1.5" />
                                   Запустить ещё раз
                                 </Button>
                               </div>
+                              <AgentStageStepper stages={rssAgentStages} />
                             </div>
                           );
                         })()}
@@ -1308,36 +2113,7 @@ export function SourceDetailPage() {
                         </div>
                         <Button
                           className="shrink-0"
-                          onClick={async () => {
-                            setAgentRunning(true);
-                            setAgentDone(false);
-                            setAgentNewConfig(null);
-                            const result = await sourceService.reonboardSource(source.id, currentTeamId!);
-                            if (result.ok) setAgentJob(result.data);
-                            setTimeout(() => {
-                              const currentVer = source.activeConfigJson?.kind === 'website_full'
-                                ? source.activeConfigJson.version : 0;
-                              setAgentRunning(false);
-                              setAgentDone(true);
-                              setAgentNewConfig({
-                                kind: 'website_full',
-                                version: currentVer + 1,
-                                list: {
-                                  itemSelectors: ['main.feed > article.card', '.articles > .article-item'],
-                                  linkSelectors: ['a.card-link[href]'],
-                                },
-                                article: {
-                                  titleSelectors: ['h1.post-title', 'h1.entry-title'],
-                                  contentSelectors: ['div.post-content', 'article.content'],
-                                  dateSelectors: ['time[datetime]', "meta[property='article:published_time']"],
-                                  mediaSelectors: ["meta[property='og:image']", 'article img'],
-                                  idSelectors: ["meta[name='article:id']", 'article[data-id]'],
-                                  canonicalSelectors: ["link[rel='canonical']", "meta[property='og:url']"],
-                                },
-                                quality: { minContentChars: 200 },
-                              });
-                            }, 8000);
-                          }}
+                          onClick={handleRunWebsiteAgent}
                         >
                           <Bot className="size-4 mr-1.5" />
                           Запустить
@@ -1352,13 +2128,14 @@ export function SourceDetailPage() {
                           <div>
                             <p className="font-medium text-sm text-gray-900">Агент анализирует сайт...</p>
                             <p className="text-xs text-gray-500 mt-0.5">
-                              {agentJob ? `Job ${agentJob.id} · это займёт несколько секунд` : "Это займёт несколько секунд"}
+                              {agentJob ? `Job ${agentJob.id} · это займёт несколько минут` : "Это займёт несколько секунд"}
                             </p>
                           </div>
                         </div>
-                        <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div className="h-1.5 rounded-full bg-gray-200 dark:bg-gray-800 overflow-hidden">
                           <div className="h-full bg-purple-500 rounded-full animate-pulse" style={{ width: "60%" }} />
                         </div>
+                        <AgentStageStepper stages={agentStages} />
                       </div>
                     )}
 
@@ -1396,16 +2173,16 @@ export function SourceDetailPage() {
                           <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
                             <div>
                               <div className="text-xs font-medium text-gray-500 mb-1.5">Текущий конфиг</div>
-                              <div className="bg-gray-50 rounded-lg p-3 font-mono text-xs space-y-1.5 border">
+                              <div className="rounded-lg border bg-gray-50 dark:bg-gray-900/60 dark:border-gray-700 p-3 font-mono text-xs space-y-1.5">
                                 {curEntries.length === 0 ? (
-                                  <span className="text-gray-400 italic">Конфиг отсутствует</span>
+                                  <span className="text-gray-400 dark:text-gray-500 italic">Конфиг отсутствует</span>
                                 ) : allKeys.map((key) => {
                                   const val = curMap.get(key);
                                   if (!val) return null;
                                   const changed = val !== newMap.get(key);
                                   return (
-                                    <div key={key} className={`flex items-start gap-1 ${changed ? "text-red-400 line-through" : "text-gray-500"}`}>
-                                      <span className="shrink-0 min-w-[160px]">{key}:</span>
+                                    <div key={key} className={`flex flex-col gap-1 sm:flex-row sm:items-start ${changed ? "text-red-400 dark:text-red-300 line-through" : "text-gray-500 dark:text-gray-400"}`}>
+                                      <span className="w-full sm:w-auto sm:min-w-[160px] sm:shrink-0">{key}:</span>
                                       <span className="break-all">{val}</span>
                                     </div>
                                   );
@@ -1414,16 +2191,16 @@ export function SourceDetailPage() {
                             </div>
                             <div>
                               <div className="text-xs font-medium text-gray-500 mb-1.5">Новый конфиг</div>
-                              <div className="bg-purple-50 rounded-lg p-3 font-mono text-xs space-y-1.5 border border-purple-200">
+                              <div className="rounded-lg border border-purple-200 bg-purple-50 dark:border-purple-800/50 dark:bg-purple-950/20 p-3 font-mono text-xs space-y-1.5">
                                 {allKeys.map((key) => {
                                   const val = newMap.get(key);
                                   if (!val) return null;
                                   const changed = val !== curMap.get(key);
                                   return (
-                                    <div key={key} className={`flex items-start gap-1 ${changed ? "text-purple-700 font-medium" : "text-gray-500"}`}>
-                                      <span className="shrink-0 min-w-[160px]">{key}:</span>
+                                    <div key={key} className={`flex flex-col gap-1 sm:flex-row sm:items-start ${changed ? "text-purple-700 dark:text-purple-300 font-medium" : "text-gray-500 dark:text-gray-400"}`}>
+                                      <span className="w-full sm:w-auto sm:min-w-[160px] sm:shrink-0">{key}:</span>
                                       <span className="break-all">{val}</span>
-                                      {changed && <span className="text-green-600 shrink-0 ml-auto">NEW</span>}
+                                      {changed && <span className="text-green-600 dark:text-green-400 shrink-0 sm:ml-auto">NEW</span>}
                                     </div>
                                   );
                                 })}
@@ -1435,7 +2212,7 @@ export function SourceDetailPage() {
                           <div>
                             <div className="text-xs font-medium text-gray-500 mb-2">Найдено статей с новым конфигом</div>
                             <div className="border rounded-lg divide-y">
-                              {AGENT_SAMPLE_ARTICLES.map((article, i) => (
+                              {agentPreviewArticles.map((article, i) => (
                                 <AgentArticleCard key={i} article={article} />
                               ))}
                             </div>
@@ -1444,14 +2221,7 @@ export function SourceDetailPage() {
                           <div className="flex items-center gap-2 pt-1">
                             <Button
                               size="sm"
-                              onClick={() => {
-                                const r = sourceService.applySourceConfig(source.id, currentTeamId!, agentNewConfig);
-                                if (!r.ok) { toast.error(r.error); return; }
-                                setAgentDone(false);
-                                setAgentNewConfig(null);
-                                setAgentJob(null);
-                                toast.success("Конфигурация обновлена");
-                              }}
+                              onClick={handleApplyWebsiteConfig}
                             >
                               <CheckCircle className="size-3.5 mr-1.5" />
                               Применить новый
@@ -1468,47 +2238,19 @@ export function SourceDetailPage() {
                             >
                               Оставить текущий
                             </Button>
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              onClick={() => {
-                                setAgentRunning(true);
-                                setAgentDone(false);
-                                setAgentNewConfig(null);
-                                sourceService.reonboardSource(source.id, currentTeamId!).then(r => { if (r.ok) setAgentJob(r.data); });
-                                // агент запущен через .then выше
-                                setTimeout(() => {
-                                  const currentVer = source.activeConfigJson?.kind === 'website_full'
-                                    ? source.activeConfigJson.version : 0;
-                                  setAgentRunning(false);
-                                  setAgentDone(true);
-                                  setAgentNewConfig({
-                                    kind: 'website_full',
-                                    version: currentVer + 1,
-                                    list: {
-                                      itemSelectors: ['section.posts > div.post-item'],
-                                      linkSelectors: ['a.post-link'],
-                                    },
-                                    article: {
-                                      titleSelectors: ['h1.entry-title'],
-                                      contentSelectors: ['div.entry-content'],
-                                      dateSelectors: ['time[datetime]', "meta[property='article:published_time']"],
-                                      mediaSelectors: ["meta[property='og:image']", 'figure img'],
-                                      idSelectors: ["meta[name='article:id']", 'article[data-id]'],
-                                      canonicalSelectors: ["link[rel='canonical']", "meta[property='og:url']"],
-                                    },
-                                    quality: { minContentChars: 150 },
-                                  });
-                                }, 8000);
-                              }}
-                            >
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={handleRunWebsiteAgent}
+                                >
                               <RefreshCw className="size-3.5 mr-1.5" />
                               Запустить ещё раз
-                            </Button>
-                          </div>
-                        </div>
-                      );
-                    })()}
+                                </Button>
+                              </div>
+                              <AgentStageStepper stages={agentStages} />
+                            </div>
+                          );
+                      })()}
                   </CardContent>
                 </Card>
               </>
@@ -1521,40 +2263,29 @@ export function SourceDetailPage() {
               <>
                 {/* Error / permissions check */}
                 {source.status === "error" && (
-                  <Card className="border-amber-200 bg-amber-50/50">
+                  <Card className="border-amber-200 bg-amber-50/50 dark:border-amber-800/50 dark:bg-amber-900/20">
                     <CardContent className="py-4">
                       <div className="flex flex-col sm:flex-row items-start sm:justify-between gap-3">
                         <div className="flex items-start gap-2.5">
-                          <AlertCircle className="size-4 text-amber-500 shrink-0 mt-0.5" />
+                          <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-500 dark:text-amber-400" />
                           <div>
-                            <p className="font-medium text-sm text-amber-800">Проблема с доступом</p>
-                            <p className="text-xs text-amber-700 mt-0.5">
-                              {source.lastError || "Бот не может получить сообщения из канала. Убедитесь, что бот добавлен в канал как администратор с правами на чтение."}
+                            <p className="text-sm font-medium text-amber-800 dark:text-amber-300">Проблема с доступом</p>
+                            <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-400">
+                              {source.lastError || "Userbot не может прочитать этот Telegram source. Для публичного канала проверьте username и авторизацию user-account сессии."}
                             </p>
                           </div>
                         </div>
                         <Button
                           variant="outline"
                           size="sm"
-                          className="shrink-0 text-amber-700 border-amber-300 hover:bg-amber-100"
+                          className="shrink-0 border-amber-300 text-amber-700 hover:bg-amber-100 dark:border-amber-700/50 dark:text-amber-300 dark:hover:bg-amber-900/30"
                           disabled={checkingPermissions}
-                          onClick={() => {
-                            setCheckingPermissions(true);
-                            setTimeout(() => {
-                              setCheckingPermissions(false);
-                              const ok = Math.random() > 0.5;
-                              if (ok) {
-                                toast.success("Права подтверждены — бот имеет доступ к каналу");
-                              } else {
-                                toast.error("Бот всё ещё не имеет доступа. Добавьте бота как администратора канала.");
-                              }
-                            }, 3000);
-                          }}
+                          onClick={handleCheckTelegramPermissions}
                         >
                           {checkingPermissions ? (
                             <><Loader2 className="size-3.5 mr-1.5 animate-spin" />Проверяю...</>
                           ) : (
-                            <><ShieldCheck className="size-3.5 mr-1.5" />Проверить права</>
+                            <><ShieldCheck className="size-3.5 mr-1.5" />Проверить доступ userbot</>
                           )}
                         </Button>
                       </div>
@@ -1602,11 +2333,7 @@ export function SourceDetailPage() {
                       <Button
                         variant="destructive"
                         size="sm"
-                        onClick={async () => {
-                          await sourceService.deleteSource(source.id, currentTeamId!);
-                          toast.success("Источник удалён");
-                          navigate("/sources");
-                        }}
+                        onClick={handleDeleteSource}
                       >
                         Да, удалить
                       </Button>
@@ -1653,40 +2380,91 @@ interface AgentArticle {
   charCount: number;
 }
 
-const AGENT_SAMPLE_ARTICLES: AgentArticle[] = [
-  {
-    title: "Стартапы в 2026: тренды и прогнозы венчурного рынка",
-    url: "https://example.com/startups-2026",
-    date: "28 фев 2026",
-    charCount: 1240,
-    imageUrl: "https://images.unsplash.com/photo-1758611972271-fce956444233?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHx0ZWNobm9sb2d5JTIwc3RhcnR1cCUyMG5ld3N8ZW58MXx8fHwxNzcyMzY0NTI4fDA&ixlib=rb-4.1.0&q=80&w=1080",
-    content: "Венчурный рынок 2026 года демонстрирует устойчивый рост на фоне макроэкономической стабилизации. По данным PitchBook, объём инвестиций в первом квартале вырос на 34% год к году, достигнув $78 млрд. Ключевые тренды — AI-first компании, климатические технологии и deeptech. Особое внимание инвесторов привлекают стартапы в области enterprise AI: автоматизация бизнес-процессов, генеративные инструменты для B2B и вертикальные AI-решения для здравоохранения и финтеха. Средний размер раунда Series A вырос до $18M, что отражает более зрелую экосистему и повышенные ожидания от метрик.",
-  },
-  {
-    title: "Новые модели GPT-5: что изменилось в архитектуре трансформеров",
-    url: "https://example.com/gpt5-architecture",
-    date: "27 фев 2026",
-    charCount: 980,
-    imageUrl: "https://images.unsplash.com/photo-1718011087751-e82f1792aa32?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxhcnRpZmljaWFsJTIwaW50ZWxsaWdlbmNlJTIwcmVzZWFyY2h8ZW58MXx8fHwxNzcyMzY0NTI4fDA&ixlib=rb-4.1.0&q=80&w=1080",
-    content: "OpenAI представила пятое поколение языковой модели с принципиально новой архитектурой, получившей название Mixture-of-Depths. В отличие от классических трансформеров, где все слои обрабатывают каждый токен, новая архитектура динамически определяет глубину вычислений для каждого токена. Это позволило сократить inference-cost на 40% при сохранении качества. Модель обучена на 15 трлн токенов с использованием synthetic data pipeline и демонстрирует SOTA-результаты на бенчмарках MMLU, HumanEval и BigBench.",
-  },
-  {
-    title: "Обзор уязвимостей: критические CVE за последнюю неделю",
-    url: "https://example.com/cve-weekly",
-    date: "26 фев 2026",
-    charCount: 1580,
-    imageUrl: "https://images.unsplash.com/photo-1768224656445-33d078c250b7?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjeWJlcnNlY3VyaXR5JTIwZGlnaXRhbHxlbnwxfHx8fDE3NzIzNTQwNjF8MA&ixlib=rb-4.1.0&q=80&w=1080",
-    content: "На прошедшей неделе было зарегистрировано 12 критических CVE со score выше 9.0. Наибольшую опасность представляет CVE-2026-1847 — RCE-уязвимость в популярной библиотеке сериализации данных, затрагивающая более 60% проектов на Node.js. Эксплуатация возможна через craft'ированный JSON-payload без аутентификации. Патч уже доступен в версии 4.2.1. Также обнаружена chain of vulnerabilities в Kubernetes RBAC, позволяющая escalation of privileges от pod-level до cluster-admin. Рекомендуется немедленное обновление до K8s 1.31.4.",
-  },
-  {
-    title: "Мультиоблачная инфраструктура: сравнение AWS, GCP и Azure в 2026",
-    url: "https://example.com/multicloud-2026",
-    date: "25 фев 2026",
-    charCount: 2100,
-    imageUrl: "https://images.unsplash.com/photo-1744868562210-fffb7fa882d9?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjbG91ZCUyMGNvbXB1dGluZyUyMHNlcnZlcnxlbnwxfHx8fDE3NzIyNTM4NDJ8MA&ixlib=rb-4.1.0&q=80&w=1080",
-    content: "Gartner опубликовал ежегодный отчёт по облачным платформам. AWS сохраняет лидерство с долей 31%, но Google Cloud показал наибольший прирост (+4.2 п.п.) благодаря агрессивному позиционированию AI-сервисов и Vertex AI. Azure стабилен на уровне 24%, делая ставку на интеграцию с Microsoft 365 и Copilot Studio. Ключевой тренд года — «AI-native cloud», где платформы конкурируют не столько по базовому compute/storage, сколько по интегрированным AI-инструментам, managed ML pipelines и inference endpoints.",
-  },
-];
+interface AgentRuntimeStage {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "done" | "error";
+}
+
+interface AgentJobState {
+  jobId: string;
+  status: "pending" | "running" | "success" | "failed" | "canceled" | "timed_out";
+  progress: number;
+  errorText: string | null;
+  preview: Record<string, unknown> | null;
+  config: WebsiteFullConfig | RssArticleOnlyConfig | null;
+  stages: AgentRuntimeStage[];
+  liveStages: AgentRuntimeStage[];
+  logs: string[];
+  logEntries: Array<{
+    id: string;
+    ts: string;
+    level: string;
+    scope: string;
+    message: string;
+    meta?: Record<string, unknown> | null;
+  }>;
+}
+
+function ConfigSummaryRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:gap-2">
+      <span className="w-full text-purple-600 sm:w-auto sm:min-w-[160px] sm:shrink-0">{label}:</span>
+      <span className="text-gray-700 break-all">{value}</span>
+    </div>
+  );
+}
+
+function ConfigFullView({ title, payload }: { title: string; payload: unknown }) {
+  return (
+    <div className="rounded-lg border border-gray-200 bg-gray-950 p-4">
+      <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">{title}</div>
+      <pre className="overflow-x-auto text-xs text-gray-100">{JSON.stringify(payload, null, 2)}</pre>
+    </div>
+  );
+}
+
+function AgentStageStepper({ stages }: { stages: AgentRuntimeStage[] }) {
+  if (stages.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2 rounded-lg border border-purple-100 bg-purple-50/60 dark:border-purple-800/50 dark:bg-purple-950/20 p-3">
+      {stages.map((stage, index) => {
+        const isDone = stage.status === "done";
+        const isRunning = stage.status === "running";
+        const isError = stage.status === "error";
+
+        return (
+          <div key={stage.id} className="flex items-center gap-3">
+            <div
+              className={[
+                "flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium",
+                isDone ? "border-green-200 bg-green-100 text-green-700 dark:border-green-800/50 dark:bg-green-900/30 dark:text-green-300" : "",
+                isRunning ? "border-purple-200 bg-purple-100 text-purple-700 dark:border-purple-800/50 dark:bg-purple-900/30 dark:text-purple-300" : "",
+                isError ? "border-red-200 bg-red-100 text-red-700 dark:border-red-800/50 dark:bg-red-900/30 dark:text-red-300" : "",
+                !isDone && !isRunning && !isError ? "border-gray-200 bg-white text-gray-400 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-500" : "",
+              ].join(" ")}
+            >
+              {index + 1}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-medium text-gray-900 dark:text-gray-100">{stage.label}</div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {stage.status === "done" && "Завершено"}
+                {stage.status === "running" && "Выполняется"}
+                {stage.status === "error" && "Ошибка"}
+                {stage.status === "pending" && "Ожидает"}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 
 function AgentArticleCard({ article }: { article: AgentArticle }) {
   const [expanded, setExpanded] = useState(false);
@@ -1760,3 +2538,17 @@ function JobStatusBadge({ status }: { status: string }) {
     return <Badge variant="secondary" className="text-xs text-gray-600">Ожидает</Badge>;
   return <Badge variant="secondary" className="text-xs">{status}</Badge>;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+

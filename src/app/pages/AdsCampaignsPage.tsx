@@ -1,285 +1,273 @@
-import { useState } from "react";
-import { useNavigate } from "react-router";
-import {
-  Plus,
-  Megaphone,
-  Filter,
-  CheckCircle2,
-  Clock,
-  Loader2,
-  Calendar,
-  FileText,
-  Eye,
-} from "lucide-react";
-import { Button } from "../components/ui/button";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "../components/ui/table";
-import { Pagination, usePagination } from "../components/Pagination";
-import { AddCampaignDialog } from "../components/AddCampaignDialog";
-import {
-  mockAdsCampaigns,
-  mockAdsPosts,
-  type AdsCampaign,
-} from "../data/mock-data";
-import { useTeam } from "../context/TeamContext";
-import * as channelService from "../services/channelService";
-import * as teamService from "../services/teamService";
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router'
+import { Calendar, CheckCircle2, Clock, Eye, FileText, Filter, Loader2, Megaphone, Plus } from 'lucide-react'
 
-const PAGE_SIZE = 10;
+import { AddCampaignDialog } from '../components/AddCampaignDialog'
+import { Pagination } from '../components/Pagination'
+import { Button } from '../components/ui/button'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table'
+import { useTeam } from '../context/TeamContext'
+import { createAdsCampaign, listTeamAdsCampaigns, listTeamAdsPosts } from '../services/adsService'
+import * as channelService from '../services/channelService'
+import type { AdsCampaign, AdsPost, Channel, ChannelTag } from '../types/domain'
 
-type StatusFilter = "all" | "ready" | "sending" | "completed";
+const PAGE_SIZE = 10
 
-const statusConfig: Record<
-  string,
-  { label: string; color: string; icon: React.ReactNode }
-> = {
+type StatusFilter = 'all' | 'ready' | 'sending' | 'completed' | 'failed'
+
+const statusConfig: Record<AdsCampaign['status'], { label: string; color: string; icon: React.ReactNode }> = {
   ready: {
-    label: "Готова",
-    color: "bg-blue-100 text-blue-700",
+    label: 'Готова',
+    color: 'bg-blue-100 text-blue-700',
     icon: <Clock className="size-3.5" />,
   },
   sending: {
-    label: "Отправка",
-    color: "bg-amber-100 text-amber-700",
+    label: 'Отправка',
+    color: 'bg-amber-100 text-amber-700',
     icon: <Loader2 className="size-3.5" />,
   },
   completed: {
-    label: "Завершена",
-    color: "bg-green-100 text-green-700",
+    label: 'Завершена',
+    color: 'bg-green-100 text-green-700',
     icon: <CheckCircle2 className="size-3.5" />,
   },
-};
+  failed: {
+    label: 'Ошибка',
+    color: 'bg-red-100 text-red-700',
+    icon: <Loader2 className="size-3.5" />,
+  },
+}
 
-export function AdsCampaignsPage() {
-  const { currentTeamId } = useTeam();
-  const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
-  const [campaigns, setCampaigns] = useState(mockAdsCampaigns);
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  const [page, setPage] = useState(1);
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+function getCampaignViews(campaign: AdsCampaign) {
+  return Object.values(campaign.channelResults ?? {}).reduce((sum, result) => sum + (result.viewsCount ?? 0), 0)
+}
 
-  const teamPosts = mockAdsPosts.filter((p) => p.teamId === currentTeamId);
-
-  const filtered =
-    statusFilter === "all"
-      ? campaigns
-      : campaigns.filter((c) => c.status === statusFilter);
-
-  const { totalPages, paginate, totalItems } = usePagination(
-    filtered,
-    PAGE_SIZE
-  );
-  const pageCampaigns = paginate(page);
-
-  const handleFilterChange = (f: StatusFilter) => {
-    setStatusFilter(f);
-    setPage(1);
-  };
-
-  if (!team) {
-    return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">
-          Команда не выбрана
-        </h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
-      </div>
-    );
+function getPostPreview(post: AdsPost | undefined) {
+  if (!post) {
+    return 'Пост не найден'
   }
 
-  const filterOptions: {
-    value: StatusFilter;
-    label: string;
-    count: number;
-    icon?: React.ReactNode;
-  }[] = [
-    { value: "all", label: "Все", count: campaigns.length },
-    {
-      value: "ready",
-      label: "Готовы",
-      count: campaigns.filter((c) => c.status === "ready").length,
-      icon: <Clock className="size-3.5 text-blue-500" />,
-    },
-    {
-      value: "sending",
-      label: "Отправка",
-      count: campaigns.filter((c) => c.status === "sending").length,
-      icon: <Loader2 className="size-3.5 text-amber-500" />,
-    },
-    {
-      value: "completed",
-      label: "Завершены",
-      count: campaigns.filter((c) => c.status === "completed").length,
-      icon: <CheckCircle2 className="size-3.5 text-green-500" />,
-    },
-  ];
+  const plainText = post.text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  return plainText || 'Медиа без текста'
+}
 
-  const handleCreateCampaign = () => {
-    setIsAddDialogOpen(true);
-  };
+export function AdsCampaignsPage() {
+  const { currentTeam, currentTeamId } = useTeam()
+  const navigate = useNavigate()
+  const [campaigns, setCampaigns] = useState<AdsCampaign[]>([])
+  const [posts, setPosts] = useState<AdsPost[]>([])
+  const [channels, setChannels] = useState<Channel[]>([])
+  const [channelTags, setChannelTags] = useState<ChannelTag[]>([])
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [page, setPage] = useState(1)
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+
+  useEffect(() => {
+    if (!currentTeamId) {
+      setCampaigns([])
+      setPosts([])
+      setChannels([])
+      setChannelTags([])
+      setIsLoading(false)
+      return
+    }
+
+    let isMounted = true
+
+    async function loadData() {
+      try {
+        setIsLoading(true)
+        setError(null)
+
+        const [campaignsResponse, postsResponse, teamChannels] = await Promise.all([
+          listTeamAdsCampaigns(currentTeamId, { limit: 100 }),
+          listTeamAdsPosts(currentTeamId, { limit: 100 }),
+          channelService.getTeamChannels(currentTeamId),
+        ])
+
+        if (!isMounted) {
+          return
+        }
+
+        setCampaigns(campaignsResponse.data)
+        setPosts(postsResponse.data)
+        setChannels(teamChannels)
+        setChannelTags(channelService.getTeamChannelTags(currentTeamId))
+      } catch (nextError) {
+        if (isMounted) {
+          setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить кампании')
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false)
+        }
+      }
+    }
+
+    void loadData()
+
+    return () => {
+      isMounted = false
+    }
+  }, [currentTeamId])
+
+  const postsById = useMemo(() => new Map(posts.map((post) => [post.id, post])), [posts])
+  const channelsById = useMemo(() => new Map(channels.map((channel) => [channel.id, channel])), [channels])
+
+  const filteredCampaigns = useMemo(() => {
+    if (statusFilter === 'all') {
+      return campaigns
+    }
+    return campaigns.filter((campaign) => campaign.status === statusFilter)
+  }, [campaigns, statusFilter])
+
+  const totalPages = Math.max(1, Math.ceil(filteredCampaigns.length / PAGE_SIZE))
+  const pageCampaigns = filteredCampaigns.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages))
+  }, [totalPages])
+
+  const filterOptions: Array<{ value: StatusFilter; label: string; count: number; icon?: React.ReactNode }> = [
+    { value: 'all', label: 'Все', count: campaigns.length },
+    { value: 'ready', label: 'Готовы', count: campaigns.filter((campaign) => campaign.status === 'ready').length, icon: <Clock className="size-3.5 text-blue-500" /> },
+    { value: 'sending', label: 'Отправка', count: campaigns.filter((campaign) => campaign.status === 'sending').length, icon: <Loader2 className="size-3.5 text-amber-500" /> },
+    { value: 'completed', label: 'Завершены', count: campaigns.filter((campaign) => campaign.status === 'completed').length, icon: <CheckCircle2 className="size-3.5 text-green-500" /> },
+    { value: 'failed', label: 'Ошибки', count: campaigns.filter((campaign) => campaign.status === 'failed').length, icon: <Loader2 className="size-3.5 text-red-500" /> },
+  ]
+
+  if (!currentTeam) {
+    return (
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-gray-900 dark:text-gray-100">Команда не выбрана</h2>
+        <p className="text-gray-600 dark:text-gray-400">Выберите команду в верхнем меню</p>
+      </div>
+    )
+  }
 
   const handleCampaignCreated = (campaign: AdsCampaign) => {
-    setCampaigns([...mockAdsCampaigns]);
-    navigate(`/ads/${campaign.id}`);
-  };
+    setCampaigns((current) => [campaign, ...current])
+    navigate(`/ads/${campaign.id}`)
+  }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-start sm:items-center justify-between gap-3 flex-wrap">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Кампании</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            {team.name} · {campaigns.length} кампаний
-          </p>
-        </div>
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <Button
-            variant="outline"
-            onClick={() => navigate("/ads/posts")}
-            className="flex-1 sm:flex-initial"
-          >
-            <FileText className="size-4 mr-2" />
-            Посты
-            <span className="ml-1.5 text-xs bg-gray-100 text-gray-600 rounded-full px-1.5 py-0.5 tabular-nums">
-              {teamPosts.length}
-            </span>
-          </Button>
-          <Button onClick={handleCreateCampaign} className="flex-1 sm:flex-initial">
-            <Plus className="size-4 mr-2" />
-            Создать кампанию
-          </Button>
+      <div className="rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 via-white to-rose-50 p-5 shadow-sm dark:border-amber-500/30 dark:from-amber-500/15 dark:via-slate-950 dark:to-rose-500/15">
+        <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
+          <div>
+            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Кампании</h1>
+            <p className="mt-0.5 text-sm text-gray-500 dark:text-gray-300">
+              {currentTeam.name} · {campaigns.length} кампаний
+            </p>
+            <p className="mt-2 max-w-2xl text-sm text-gray-500 dark:text-gray-300">
+              Здесь вы управляете рекламными кампаниями. Вы можете создать кампанию, выбрать пост и каналы.
+            </p>
+          </div>
+          <div className="flex w-full items-center gap-2 sm:w-auto">
+            <Button variant="outline" onClick={() => navigate('/ads/posts')} className="flex-1 sm:flex-initial">
+              <FileText className="mr-2 size-4" />
+              Посты
+              <span className="ml-1.5 rounded-full bg-gray-100 px-1.5 py-0.5 text-xs text-gray-600 tabular-nums">{posts.length}</span>
+            </Button>
+            <Button onClick={() => setIsAddDialogOpen(true)} className="flex-1 sm:flex-initial">
+              <Plus className="mr-2 size-4" />
+              Создать кампанию
+            </Button>
+          </div>
         </div>
       </div>
 
-      {/* Filter bar */}
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <Filter className="size-3.5 text-gray-400 shrink-0" />
-          <div className="flex items-center gap-1 flex-wrap">
+          <Filter className="size-3.5 shrink-0 text-gray-400 dark:text-gray-500" />
+          <div className="flex flex-wrap items-center gap-1">
             {filterOptions.map(({ value, label, count, icon }) => (
               <button
                 key={value}
-                onClick={() => handleFilterChange(value)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm transition-colors ${
-                  statusFilter === value
-                    ? "bg-gray-900 text-white"
-                    : "text-gray-500 hover:text-gray-800 hover:bg-gray-100"
+                type="button"
+                onClick={() => {
+                  setStatusFilter(value)
+                  setPage(1)
+                }}
+                className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  statusFilter === value ? 'bg-gray-900 text-white dark:bg-gray-100 dark:text-gray-950' : 'text-gray-500 hover:bg-gray-100 hover:text-gray-800 dark:text-gray-400 dark:hover:bg-gray-900 dark:hover:text-gray-100'
                 }`}
               >
                 {icon}
                 {label}
-                <span
-                  className={`text-xs tabular-nums ${
-                    statusFilter === value ? "text-white/50" : "text-gray-400"
-                  }`}
-                >
-                  {count}
-                </span>
+                <span className={`text-xs tabular-nums ${statusFilter === value ? 'opacity-70' : 'text-gray-400'}`}>{count}</span>
               </button>
             ))}
           </div>
         </div>
-        {statusFilter !== "all" && (
-          <button
-            onClick={() => handleFilterChange("all")}
-            className="text-xs text-gray-400 hover:text-gray-600 transition-colors"
-          >
+        {statusFilter !== 'all' && (
+          <button type="button" onClick={() => setStatusFilter('all')} className="text-xs text-gray-400 transition-colors hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300">
             Сбросить
           </button>
         )}
       </div>
 
-      {/* Campaigns — Mobile cards */}
-      <div className="md:hidden space-y-3">
-        {pageCampaigns.length === 0 ? (
-          <div className="text-center py-12 text-gray-500">
-            <Megaphone className="size-8 text-gray-300 mx-auto mb-3" />
-            <div className="font-medium">
-              {campaigns.length === 0
-                ? "Кампаний пока нет"
-                : "Нет кампаний с выбранным фильтром"}
-            </div>
-            {campaigns.length === 0 && (
-              <Button className="mt-4" onClick={handleCreateCampaign}>
-                <Plus className="size-4 mr-2" />
-                Создать к��мпанию
-              </Button>
-            )}
+      {error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">{error}</div>
+      ) : null}
+
+      <div className="space-y-3 md:hidden">
+        {isLoading ? (
+          <div className="py-12 text-center text-gray-500 dark:text-gray-400">Загрузка кампаний...</div>
+        ) : pageCampaigns.length === 0 ? (
+          <div className="py-12 text-center text-gray-500 dark:text-gray-400">
+            <Megaphone className="mx-auto mb-3 size-8 text-gray-300 dark:text-gray-600" />
+            <div className="font-medium">{campaigns.length === 0 ? 'Кампаний пока нет' : 'Нет кампаний с выбранным фильтром'}</div>
           </div>
         ) : (
           pageCampaigns.map((campaign) => {
-            const status = statusConfig[campaign.status];
-            const post = mockAdsPosts.find((p) => p.id === campaign.adsPostId);
-            const channelNames = channelService.getTeamChannelsList(currentTeamId ?? "")
-              .filter((ch) => campaign.targetChannels.includes(ch.id))
-              .map((ch) => ch.telegramId);
-            const totalViews = Object.values(campaign.channelResults ?? {}).reduce(
-              (sum, r) => sum + (r.viewsCount ?? 0),
-              0
-            );
+            const status = statusConfig[campaign.status]
+            const post = postsById.get(campaign.adsPostId)
+    const channelNames = campaign.targetChannels.map((channelId) => channelService.getChannelDisplayLabel(channelsById.get(channelId) ?? { telegramTarget: channelId, telegramUsername: undefined }))
+            const totalViews = getCampaignViews(campaign)
 
             return (
               <div
                 key={campaign.id}
-                className="bg-white rounded-lg border p-4 active:bg-gray-50 transition-colors cursor-pointer"
+                className="cursor-pointer rounded-lg border bg-white p-4 transition-colors active:bg-gray-50 dark:border-gray-800 dark:bg-gray-950 dark:active:bg-gray-900"
                 onClick={() => navigate(`/ads/${campaign.id}`)}
               >
-                <div className="flex items-start justify-between gap-3 mb-2">
+                <div className="mb-2 flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <div className="font-medium text-gray-900 truncate">
-                      {campaign.name}
-                    </div>
-                    {post && (
-                      <div className="text-xs text-gray-400 mt-0.5 truncate">
-                        {post.text.split("\n")[0]}
-                      </div>
-                    )}
+                    <div className="truncate font-medium text-gray-900 dark:text-gray-100">{campaign.name}</div>
+                    <div className="mt-0.5 truncate text-xs text-gray-400 dark:text-gray-500">{getPostPreview(post)}</div>
                   </div>
-                  {status && (
-                    <span
-                      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium shrink-0 ${status.color}`}
-                    >
-                      {status.icon}
-                      {status.label}
-                    </span>
-                  )}
+                  <span className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
+                    {status.icon}
+                    {status.label}
+                  </span>
                 </div>
-                <div className="flex items-center gap-3 text-xs text-gray-500 flex-wrap">
+                <div className="flex flex-wrap items-center gap-3 text-xs text-gray-500 dark:text-gray-400">
                   <span>{channelNames.length} каналов</span>
                   {totalViews > 0 && (
                     <span className="flex items-center gap-1">
-                      <Eye className="size-3" /> {totalViews.toLocaleString("ru-RU")}
+                      <Eye className="size-3" />
+                      {totalViews.toLocaleString('ru-RU')}
                     </span>
                   )}
                   <span className="text-green-600">{campaign.sentCount} отпр.</span>
-                  {campaign.failedCount > 0 && (
-                    <span className="text-red-600">
-                      {campaign.failedCount} ошиб.
-                    </span>
-                  )}
+                  {campaign.failedCount > 0 && <span className="text-red-600">{campaign.failedCount} ошиб.</span>}
                   {campaign.scheduledAt && (
                     <span className="flex items-center gap-1 text-gray-400">
                       <Calendar className="size-3" />
-                      {new Date(campaign.scheduledAt).toLocaleDateString("ru-RU")}
+                      {new Date(campaign.scheduledAt).toLocaleDateString('ru-RU')}
                     </span>
                   )}
                 </div>
               </div>
-            );
+            )
           })
         )}
       </div>
 
-      {/* Campaigns Table — Desktop */}
-      <div className="bg-white rounded-lg border hidden md:block">
+      <div className="hidden rounded-lg border bg-white dark:border-gray-800 dark:bg-gray-950 md:block">
         <Table>
           <TableHeader>
             <TableRow>
@@ -298,174 +286,87 @@ export function AdsCampaignsPage() {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {pageCampaigns.length === 0 ? (
+            {isLoading ? (
               <TableRow>
-                <TableCell
-                  colSpan={7}
-                  className="text-center py-12 text-gray-500"
-                >
-                  <Megaphone className="size-8 text-gray-300 mx-auto mb-3" />
-                  <div className="font-medium">
-                    {campaigns.length === 0
-                      ? "Кампаний пока нет"
-                      : "Нет кампаний с выбранным фильтром"}
-                  </div>
-                  {campaigns.length === 0 && (
-                    <>
-                      <div className="text-sm mt-1">
-                        Создайте первую рекламную кампанию для мссовой рассылки
-                      </div>
-                      <Button
-                        className="mt-4"
-                        onClick={handleCreateCampaign}
-                      >
-                        <Plus className="size-4 mr-2" />
-                        Создать кампанию
-                      </Button>
-                    </>
-                  )}
+                <TableCell colSpan={7} className="py-12 text-center text-gray-500 dark:text-gray-400">
+                  Загрузка кампаний...
+                </TableCell>
+              </TableRow>
+            ) : pageCampaigns.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={7} className="py-12 text-center text-gray-500 dark:text-gray-400">
+                  <Megaphone className="mx-auto mb-3 size-8 text-gray-300 dark:text-gray-600" />
+                  <div className="font-medium">{campaigns.length === 0 ? 'Кампаний пока нет' : 'Нет кампаний с выбранным фильтром'}</div>
                 </TableCell>
               </TableRow>
             ) : (
               pageCampaigns.map((campaign) => {
-                const status = statusConfig[campaign.status];
-                const post = mockAdsPosts.find(
-                  (p) => p.id === campaign.adsPostId
-                );
-                const channelNames = channelService.getTeamChannelsList(currentTeamId ?? "")
-                  .filter((ch) =>
-                    campaign.targetChannels.includes(ch.id)
-                  )
-                  .map((ch) => ch.telegramId);
-
-                const MAX_VISIBLE_CHANNELS = 2;
-                const visibleChannels = channelNames.slice(0, MAX_VISIBLE_CHANNELS);
-                const hiddenCount = channelNames.length - MAX_VISIBLE_CHANNELS;
+                const status = statusConfig[campaign.status]
+                const post = postsById.get(campaign.adsPostId)
+    const channelNames = campaign.targetChannels.map((channelId) => channelService.getChannelDisplayLabel(channelsById.get(channelId) ?? { telegramTarget: channelId, telegramUsername: undefined }))
+                const visibleChannels = channelNames.slice(0, 2)
+                const hiddenCount = Math.max(0, channelNames.length - visibleChannels.length)
 
                 return (
-                  <TableRow
-                    key={campaign.id}
-                    className="cursor-pointer hover:bg-gray-50"
-                    onClick={() => navigate(`/ads/${campaign.id}`)}
-                  >
+                  <TableRow key={campaign.id} className="cursor-pointer hover:bg-gray-50" onClick={() => navigate(`/ads/${campaign.id}`)}>
                     <TableCell>
                       <div>
-                        <div className="font-medium text-gray-900">
-                          {campaign.name}
-                        </div>
-                        {post && (
-                          <div className="text-xs text-gray-400 mt-0.5 truncate max-w-[250px]">
-                            {post.text.split("\n")[0]}
-                          </div>
-                        )}
+                        <div className="font-medium text-gray-900 dark:text-gray-100">{campaign.name}</div>
+                        <div className="mt-0.5 max-w-[280px] truncate text-xs text-gray-400 dark:text-gray-500">{getPostPreview(post)}</div>
                       </div>
                     </TableCell>
                     <TableCell>
-                      {status && (
-                        <span
-                          className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${status.color}`}
-                        >
-                          {status.icon}
-                          {status.label}
-                        </span>
-                      )}
+                      <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ${status.color}`}>
+                        {status.icon}
+                        {status.label}
+                      </span>
                     </TableCell>
                     <TableCell>
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {visibleChannels.map((name) => (
-                          <span
-                            key={name}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              window.open(`https://t.me/${name.replace("@", "")}`, "_blank");
-                            }}
-                            className="inline-flex items-center px-2 py-0.5 rounded-md bg-gray-100 text-xs text-gray-700 hover:bg-gray-200 hover:text-blue-600 cursor-pointer transition-colors"
-                          >
-                            {name}
-                          </span>
-                        ))}
-                        {hiddenCount > 0 && (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-gray-50 text-xs text-gray-400">
-                            +{hiddenCount}
-                          </span>
-                        )}
+                      <div className="max-w-[220px] text-sm text-gray-600 dark:text-gray-300">
+                        {visibleChannels.join(', ')}
+                        {hiddenCount > 0 ? ` +${hiddenCount}` : ''}
                       </div>
                     </TableCell>
                     <TableCell className="text-center tabular-nums">
-                      {(() => {
-                        const views = Object.values(campaign.channelResults ?? {}).reduce(
-                          (sum, r) => sum + (r.viewsCount ?? 0), 0
-                        );
-                        return views > 0 ? (
-                          <span className="text-sm font-medium text-gray-900">
-                            {views.toLocaleString("ru-RU")}
-                          </span>
-                        ) : (
-                          <span className="text-xs text-gray-400">—</span>
-                        );
-                      })()}
+                      {getCampaignViews(campaign) > 0 ? getCampaignViews(campaign).toLocaleString('ru-RU') : '—'}
                     </TableCell>
-                    <TableCell>
-                      {campaign.scheduledAt ? (
-                        <div className="flex items-center gap-1.5 text-sm text-gray-600">
-                          <Calendar className="size-3.5 text-gray-400" />
-                          {new Date(campaign.scheduledAt).toLocaleString(
-                            "ru-RU",
-                            {
-                              day: "numeric",
-                              month: "short",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            }
-                          )}
-                        </div>
-                      ) : (
-                        <span className="text-gray-400 text-sm">—</span>
-                      )}
+                    <TableCell className="text-sm text-gray-500 dark:text-gray-400">
+                      {campaign.scheduledAt ? new Date(campaign.scheduledAt).toLocaleString('ru-RU') : 'Сразу'}
                     </TableCell>
-                    <TableCell>
-                      <span className="text-sm text-gray-600">
-                        {new Date(campaign.createdAt).toLocaleDateString(
-                          "ru-RU"
-                        )}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-center">
-                      <div className="text-sm tabular-nums">
-                        <span className="text-green-600 font-medium">
-                          {campaign.sentCount}
-                        </span>
-                        {" / "}
-                        <span className="text-red-600 font-medium">
-                          {campaign.failedCount}
-                        </span>
-                        {" / "}
-                        <span className="text-gray-900 text-base font-semibold">
-                          {campaign.targetChannels.length}
-                        </span>
-                      </div>
+                    <TableCell className="text-sm text-gray-500 dark:text-gray-400">{new Date(campaign.createdAt).toLocaleString('ru-RU')}</TableCell>
+                    <TableCell className="text-center text-sm">
+                      <span className="text-green-700">{campaign.sentCount}</span>
+                      <span className="mx-1 text-gray-300">/</span>
+                      <span className="text-red-700">{campaign.failedCount}</span>
+                      <span className="mx-1 text-gray-300">/</span>
+                      <span className="text-gray-500 dark:text-gray-400">{campaign.targetChannels.length}</span>
                     </TableCell>
                   </TableRow>
-                );
+                )
               })
             )}
           </TableBody>
         </Table>
       </div>
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={totalItems}
-        pageSize={PAGE_SIZE}
-      />
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={filteredCampaigns.length} pageSize={PAGE_SIZE} />
 
       <AddCampaignDialog
         open={isAddDialogOpen}
         onOpenChange={setIsAddDialogOpen}
+        posts={posts}
+        channels={channels}
+        channelTags={channelTags}
         onCreated={handleCampaignCreated}
+        onCreateCampaign={async (input) => {
+          if (!currentTeamId) {
+            throw new Error('Команда не выбрана')
+          }
+
+          const response = await createAdsCampaign(currentTeamId, input)
+          return response.campaign
+        }}
       />
     </div>
-  );
+  )
 }

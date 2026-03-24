@@ -1,59 +1,81 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Shield, Trash2, AlertCircle } from "lucide-react";
+import { AlertCircle, Plus, Shield, Trash2 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from "../components/ui/table";
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger, DialogFooter,
-} from "../components/ui/dialog";
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
-} from "../components/ui/alert-dialog";
-import { mockAdmins, getCurrentAdmin } from "../data/mock-data";
-// ── RBAC (admin уровень) ─────────────────────────────────────────────
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "../components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "../components/ui/alert-dialog";
 import { useAdminPermissions } from "../lib/rbac";
-// ── Zod-валидация ────────────────────────────────────────────────────
 import { safeParse, adminSchema } from "../lib/validators";
 import { useAuth } from "../context/AuthContext";
+import { createAdmin, deleteAdmin, getAdmins, type AdminRecord } from "../services/adminService";
 
 export function AdminAdminsPage() {
-  const [admins] = useState(mockAdmins);
+  const [admins, setAdmins] = useState<AdminRecord[]>([]);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newNickname, setNewNickname] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [formErrors, setFormErrors] = useState<{ nickname?: string; password?: string }>({});
-
   const { currentAdmin } = useAuth();
-  // ── Централизованная проверка прав администратора ──
-  const { canManageAdmins, isRoot } = useAdminPermissions();
+  const { canManageAdmins } = useAdminPermissions();
 
-  const handleCreate = () => {
-    // Zod-валидация через централизованную схему
-    const result = safeParse(adminSchema, { nickname: newNickname, password: newPassword });
-    if (!result.ok) {
-      const errs: { nickname?: string; password?: string } = {};
-      const issues = result.errors.issues ?? (result.errors as any).errors ?? [];
-      for (const e of issues) {
-        const field = e.path[0] as 'nickname' | 'password';
-        errs[field] = e.message;
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadAdmins() {
+      try {
+        const data = await getAdmins();
+        if (isMounted) {
+          setAdmins(data);
+        }
+      } catch {
+        if (isMounted) {
+          setAdmins([]);
+        }
       }
-      setFormErrors(errs);
+    }
+
+    void loadAdmins();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleCreate = async () => {
+    const result = safeParse(adminSchema, { nickname: newNickname, password: newPassword });
+    if (result.ok === false) {
+      const nextErrors: { nickname?: string; password?: string } = {};
+      const validationErrors = result.errors;
+      const issues = validationErrors.issues ?? (validationErrors as any).errors ?? [];
+      for (const issue of issues) {
+        const field = issue.path[0] as "nickname" | "password";
+        nextErrors[field] = issue.message;
+      }
+      setFormErrors(nextErrors);
       return;
     }
 
-    setFormErrors({});
-    // В реальном приложении: POST /api/admins
-    console.log("Creating admin:", result.data);
-    toast.success(`Администратор "${result.data.nickname}" создан`);
-    setIsCreateOpen(false);
-    setNewNickname("");
-    setNewPassword("");
+    try {
+      const response = await createAdmin(result.data);
+      setAdmins((state) => [...state, response.admin]);
+      toast.success(`Администратор "${response.admin.nickname}" создан`);
+      handleCloseDialog();
+    } catch (error: any) {
+      toast.error(error.message || "Не удалось создать администратора");
+    }
+  };
+
+  const handleDelete = async (adminId: string, nickname: string) => {
+    try {
+      await deleteAdmin(adminId);
+      setAdmins((state) => state.filter((admin) => admin.id !== adminId));
+      toast.success(`Администратор "${nickname}" удален`);
+    } catch (error: any) {
+      toast.error(error.message || "Не удалось удалить администратора");
+    }
   };
 
   const handleCloseDialog = () => {
@@ -65,154 +87,129 @@ export function AdminAdminsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-start sm:items-center justify-between gap-3 flex-wrap">
+      <div className="flex flex-wrap items-start justify-between gap-3 sm:items-center">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Администраторы</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            Управление аккаунтами администраторов
-          </p>
+          <p className="mt-0.5 text-sm text-gray-500">Управление аккаунтами администраторов</p>
         </div>
-        {/* RBAC: создание доступно только root */}
-        {canManageAdmins && (
-          <Dialog open={isCreateOpen} onOpenChange={(o) => o ? setIsCreateOpen(true) : handleCloseDialog()}>
+        {canManageAdmins ? (
+          <Dialog open={isCreateOpen} onOpenChange={(open) => open ? setIsCreateOpen(true) : handleCloseDialog()}>
             <DialogTrigger asChild>
               <Button>
-                <Plus className="size-4 mr-2" />
+                <Plus className="mr-2 size-4" />
                 Добавить админа
               </Button>
             </DialogTrigger>
             <DialogContent className="max-w-md">
               <DialogHeader>
                 <DialogTitle>Новый администратор</DialogTitle>
-                <DialogDescription>
-                  Создайте аккаунт администратора с никнеймом и паролем
-                </DialogDescription>
+                <DialogDescription>Создайте аккаунт администратора с никнеймом и паролем</DialogDescription>
               </DialogHeader>
               <div className="space-y-4 py-4">
                 <div className="space-y-2">
                   <Label htmlFor="admin-nick" className="mb-1 block">Никнейм</Label>
                   <Input
                     id="admin-nick"
-                    placeholder="admin_new"
                     value={newNickname}
-                    onChange={(e) => {
-                      setNewNickname(e.target.value);
-                      setFormErrors(p => ({ ...p, nickname: undefined }));
+                    onChange={(event) => {
+                      setNewNickname(event.target.value);
+                      setFormErrors((state) => ({ ...state, nickname: undefined }));
                     }}
                     autoFocus
                     className={formErrors.nickname ? "border-red-400 focus-visible:ring-red-400" : ""}
                   />
-                  {formErrors.nickname && (
-                    <p className="text-xs text-red-600 flex items-center gap-1 mt-0.5">
-                      <AlertCircle className="size-3" /> {formErrors.nickname}
+                  {formErrors.nickname ? (
+                    <p className="mt-0.5 flex items-center gap-1 text-xs text-red-600">
+                      <AlertCircle className="size-3" />
+                      {formErrors.nickname}
                     </p>
-                  )}
-                  <p className="text-xs text-gray-400">
-                    Латинские буквы, цифры и _ · 3–30 символов
-                  </p>
+                  ) : null}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="admin-pass" className="mb-1 block">Пароль</Label>
                   <Input
                     id="admin-pass"
                     type="password"
-                    placeholder="Минимум 6 символов"
                     value={newPassword}
-                    onChange={(e) => {
-                      setNewPassword(e.target.value);
-                      setFormErrors(p => ({ ...p, password: undefined }));
+                    onChange={(event) => {
+                      setNewPassword(event.target.value);
+                      setFormErrors((state) => ({ ...state, password: undefined }));
                     }}
                     className={formErrors.password ? "border-red-400 focus-visible:ring-red-400" : ""}
                   />
-                  {formErrors.password && (
-                    <p className="text-xs text-red-600 flex items-center gap-1 mt-0.5">
-                      <AlertCircle className="size-3" /> {formErrors.password}
+                  {formErrors.password ? (
+                    <p className="mt-0.5 flex items-center gap-1 text-xs text-red-600">
+                      <AlertCircle className="size-3" />
+                      {formErrors.password}
                     </p>
-                  )}
+                  ) : null}
                 </div>
               </div>
               <DialogFooter>
                 <Button variant="outline" onClick={handleCloseDialog}>Отмена</Button>
-                <Button onClick={handleCreate} disabled={!newNickname || !newPassword}>
-                  Создать
-                </Button>
+                <Button onClick={() => void handleCreate()} disabled={!newNickname || !newPassword}>Создать</Button>
               </DialogFooter>
             </DialogContent>
           </Dialog>
-        )}
+        ) : null}
       </div>
 
-      {/* Admins — Mobile cards */}
-      <div className="md:hidden space-y-3">
+      <div className="space-y-3 md:hidden">
         {admins.map((admin) => (
-          <div key={admin.id} className="bg-white rounded-lg border p-4">
+          <div key={admin.id} className="rounded-lg border bg-white p-4">
             <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="size-8 rounded-full bg-red-600 text-white flex items-center justify-center text-sm font-medium flex-shrink-0">
-                  {admin.nickname[0].toUpperCase()}
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="flex size-8 items-center justify-center rounded-full bg-red-600 text-sm font-medium text-white">
+                  {admin.nickname[0]?.toUpperCase()}
                 </div>
                 <div className="min-w-0">
-                  <div className="font-medium text-gray-900 truncate">{admin.nickname}</div>
+                  <div className="truncate font-medium text-gray-900">{admin.nickname}</div>
                   <div className="text-xs text-gray-500">ID: {admin.id}</div>
                 </div>
               </div>
-              {/* RBAC: удаление только root, нельзя удалить самого себя или другого root */}
-              {canManageAdmins && !admin.isRoot && admin.id !== currentAdmin?.id && (
+              {canManageAdmins && !admin.isRoot && admin.id !== currentAdmin?.id ? (
                 <AlertDialog>
                   <AlertDialogTrigger asChild>
-                    <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700 shrink-0">
+                    <Button variant="ghost" size="sm" className="shrink-0 text-red-600 hover:text-red-700">
                       <Trash2 className="size-4" />
                     </Button>
                   </AlertDialogTrigger>
                   <AlertDialogContent>
                     <AlertDialogHeader>
                       <AlertDialogTitle>Удалить администратора?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Администратор <strong>{admin.nickname}</strong> будет удалён. Это действие необратимо.
-                      </AlertDialogDescription>
+                      <AlertDialogDescription>Администратор <strong>{admin.nickname}</strong> будет удален.</AlertDialogDescription>
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                       <AlertDialogCancel>Отмена</AlertDialogCancel>
-                      <AlertDialogAction
-                        className="bg-red-600 hover:bg-red-700"
-                        onClick={() => toast.success(`Администратор "${admin.nickname}" удалён`)}
-                      >
+                      <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleDelete(admin.id, admin.nickname)}>
                         Удалить
                       </AlertDialogAction>
                     </AlertDialogFooter>
                   </AlertDialogContent>
                 </AlertDialog>
-              )}
+              ) : null}
             </div>
-            <div className="flex items-center gap-2 mt-2 flex-wrap">
+            <div className="mt-2 flex flex-wrap items-center gap-2">
               {admin.isRoot ? (
-                <Badge variant="default" className="gap-1">
-                  <Shield className="size-3" /> Root
-                </Badge>
+                <Badge variant="default" className="gap-1"><Shield className="size-3" /> Root</Badge>
               ) : (
                 <Badge variant="secondary">Admin</Badge>
               )}
-              {admin.id === currentAdmin?.id && (
-                <Badge variant="outline" className="text-xs text-green-700 border-green-200 bg-green-50">Вы</Badge>
-              )}
-              <span className="text-xs text-gray-400">
-                {new Date(admin.createdAt).toLocaleDateString("ru-RU")}
-              </span>
+              {admin.id === currentAdmin?.id ? <Badge variant="outline" className="border-green-200 bg-green-50 text-xs text-green-700">Вы</Badge> : null}
+              <span className="text-xs text-gray-400">{new Date(admin.createdAt).toLocaleDateString("ru-RU")}</span>
             </div>
           </div>
         ))}
       </div>
 
-      {/* Admins Table — Desktop */}
-      <div className="bg-white rounded-lg border hidden md:block">
+      <div className="hidden rounded-lg border bg-white md:block">
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Администратор</TableHead>
               <TableHead>Тип</TableHead>
               <TableHead>Создан</TableHead>
-              <TableHead>Последняя активность</TableHead>
-              {canManageAdmins && <TableHead className="w-[80px]">Действия</TableHead>}
+              {canManageAdmins ? <TableHead className="w-[80px]">Действия</TableHead> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -220,15 +217,13 @@ export function AdminAdminsPage() {
               <TableRow key={admin.id}>
                 <TableCell>
                   <div className="flex items-center gap-3">
-                    <div className="size-8 rounded-full bg-red-600 text-white flex items-center justify-center text-sm font-medium flex-shrink-0">
-                      {admin.nickname[0].toUpperCase()}
+                    <div className="flex size-8 items-center justify-center rounded-full bg-red-600 text-sm font-medium text-white">
+                      {admin.nickname[0]?.toUpperCase()}
                     </div>
                     <div>
-                      <div className="font-medium text-gray-900 flex items-center gap-2">
+                      <div className="flex items-center gap-2 font-medium text-gray-900">
                         {admin.nickname}
-                        {admin.id === currentAdmin?.id && (
-                          <Badge variant="outline" className="text-xs text-green-700 border-green-200 bg-green-50">Вы</Badge>
-                        )}
+                        {admin.id === currentAdmin?.id ? <Badge variant="outline" className="border-green-200 bg-green-50 text-xs text-green-700">Вы</Badge> : null}
                       </div>
                       <div className="text-xs text-gray-500">ID: {admin.id}</div>
                     </div>
@@ -236,27 +231,17 @@ export function AdminAdminsPage() {
                 </TableCell>
                 <TableCell>
                   {admin.isRoot ? (
-                    <Badge variant="default" className="gap-1">
-                      <Shield className="size-3" />
-                      Root
-                    </Badge>
+                    <Badge variant="default" className="gap-1"><Shield className="size-3" /> Root</Badge>
                   ) : (
                     <Badge variant="secondary">Admin</Badge>
                   )}
                 </TableCell>
                 <TableCell>
-                  <span className="text-sm text-gray-500">
-                    {new Date(admin.createdAt).toLocaleDateString("ru-RU")}
-                  </span>
+                  <span className="text-sm text-gray-500">{new Date(admin.createdAt).toLocaleDateString("ru-RU")}</span>
                 </TableCell>
-                <TableCell>
-                  <span className="text-sm text-gray-500">
-                    {new Date(admin.lastActive).toLocaleDateString("ru-RU")}
-                  </span>
-                </TableCell>
-                {canManageAdmins && (
+                {canManageAdmins ? (
                   <TableCell>
-                    {!admin.isRoot && admin.id !== currentAdmin?.id && (
+                    {!admin.isRoot && admin.id !== currentAdmin?.id ? (
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
                           <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700">
@@ -266,44 +251,23 @@ export function AdminAdminsPage() {
                         <AlertDialogContent>
                           <AlertDialogHeader>
                             <AlertDialogTitle>Удалить администратора?</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              Администратор <strong>{admin.nickname}</strong> будет удалён. Это действие необратимо.
-                            </AlertDialogDescription>
+                            <AlertDialogDescription>Администратор <strong>{admin.nickname}</strong> будет удален.</AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Отмена</AlertDialogCancel>
-                            <AlertDialogAction
-                              className="bg-red-600 hover:bg-red-700"
-                              onClick={() => toast.success(`Администратор "${admin.nickname}" удалён`)}
-                            >
+                            <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => void handleDelete(admin.id, admin.nickname)}>
                               Удалить
                             </AlertDialogAction>
                           </AlertDialogFooter>
                         </AlertDialogContent>
                       </AlertDialog>
-                    )}
+                    ) : null}
                   </TableCell>
-                )}
+                ) : null}
               </TableRow>
             ))}
           </TableBody>
         </Table>
-      </div>
-
-      {/* Info block */}
-      {!canManageAdmins && (
-        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
-          Только Root-администратор может создавать и удалять других администраторов.
-        </div>
-      )}
-
-      {/* RBAC info */}
-      <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm">
-        <div className="font-medium text-blue-900 mb-1">Роли администраторов</div>
-        <ul className="space-y-1 text-blue-700">
-          <li><span className="font-medium">Root</span> — создаётся при запуске системы. Может управлять другими администраторами.</li>
-          <li><span className="font-medium">Admin</span> — обычный администратор. Управляет командами и пользователями.</li>
-        </ul>
       </div>
     </div>
   );

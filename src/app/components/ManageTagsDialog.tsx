@@ -1,34 +1,22 @@
-import { useState } from "react";
-import { Plus, Trash2, Check, X, Tag } from "lucide-react";
-import { toast } from "sonner";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "./ui/dialog";
-import { Button } from "./ui/button";
-import { Input } from "./ui/input";
-import { TagBadge, TAG_DOT_COLORS } from "./TagBadge";
-import type { TagColor, ChannelTag, SourceTag } from "../data/mock-data";
-import {
-  TAG_COLORS,
-  addChannelTag,
-  addSourceTag,
-  deleteChannelTag,
-  deleteSourceTag,
-  renameChannelTag,
-  renameSourceTag,
-} from "../data/mock-data";
+import { useState } from 'react'
+import { Check, Plus, Tag, Trash2, X } from 'lucide-react'
+import { toast } from 'sonner'
+
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './ui/dialog'
+import { Button } from './ui/button'
+import { Input } from './ui/input'
+import { TAG_DOT_COLORS, TagBadge } from './TagBadge'
+import { TAG_COLORS, type ChannelTag, type SourceTag, type TagColor } from '../types/domain'
+import * as channelService from '../services/channelService'
+import * as sourceService from '../services/sourceService'
 
 interface ManageTagsDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  teamId: string;
-  kind: "channel" | "source";
-  tags: (ChannelTag | SourceTag)[];
-  onChanged: () => void;
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  teamId: string
+  kind: 'channel' | 'source'
+  tags: (ChannelTag | SourceTag)[]
+  onChanged: () => void
 }
 
 export function ManageTagsDialog({
@@ -39,50 +27,90 @@ export function ManageTagsDialog({
   tags,
   onChanged,
 }: ManageTagsDialogProps) {
-  const [newName, setNewName] = useState("");
-  const [newColor, setNewColor] = useState<TagColor>("blue");
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editingName, setEditingName] = useState("");
+  const [newName, setNewName] = useState('')
+  const [newColor, setNewColor] = useState<TagColor>('blue')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const handleAdd = () => {
-    const trimmed = newName.trim();
-    if (!trimmed) return;
-    if (tags.some(t => t.name.toLowerCase() === trimmed.toLowerCase())) {
-      toast.error("Тег с таким именем уже существует");
-      return;
+  const handleAdd = async () => {
+    const trimmed = newName.trim()
+    if (!trimmed) {
+      return
     }
-    if (kind === "channel") {
-      addChannelTag(teamId, trimmed, newColor);
-    } else {
-      addSourceTag(teamId, trimmed, newColor);
-    }
-    setNewName("");
-    onChanged();
-    toast.success(`Тег "${trimmed}" создан`);
-  };
 
-  const handleDelete = (tagId: string, tagName: string) => {
-    const count = kind === "channel" ? deleteChannelTag(tagId) : deleteSourceTag(tagId);
-    onChanged();
-    if (count > 0) {
-      toast.success(`Тег "${tagName}" удалён и отвязан от ${count} ${kind === "channel" ? "каналов" : "источников"}`);
-    } else {
-      toast.success(`Тег "${tagName}" удалён`);
+    if (tags.some((tag) => tag.name.toLowerCase() === trimmed.toLowerCase())) {
+      toast.error('Тег с таким именем уже существует')
+      return
     }
-  };
 
-  const handleRename = (tagId: string) => {
-    const trimmed = editingName.trim();
-    if (!trimmed) return;
-    if (kind === "channel") {
-      renameChannelTag(tagId, trimmed);
-    } else {
-      renameSourceTag(tagId, trimmed);
+    try {
+      setIsSubmitting(true)
+
+      if (kind === 'channel') {
+        await channelService.createChannelTag(teamId, trimmed, newColor)
+      } else {
+        await sourceService.createSourceTag(teamId, trimmed, newColor)
+      }
+
+      setNewName('')
+      onChanged()
+      toast.success(`Тег "${trimmed}" создан`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось создать тег')
+    } finally {
+      setIsSubmitting(false)
     }
-    setEditingId(null);
-    onChanged();
-    toast.success("Тег переименован");
-  };
+  }
+
+  const handleDelete = async (tagId: string, tagName: string) => {
+    try {
+      setIsSubmitting(true)
+
+      if (kind === 'channel') {
+        await channelService.deleteChannelTag(teamId, tagId)
+      } else {
+        await sourceService.deleteSourceTag(teamId, tagId)
+      }
+
+      onChanged()
+      toast.success(`Тег "${tagName}" удалён`)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось удалить тег')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
+
+  const handleRename = async (tagId: string) => {
+    const trimmed = editingName.trim()
+    if (!trimmed) {
+      return
+    }
+
+    if (tags.some((tag) => tag.id !== tagId && tag.name.toLowerCase() === trimmed.toLowerCase())) {
+      toast.error('Тег с таким именем уже существует')
+      return
+    }
+
+    try {
+      setIsSubmitting(true)
+
+      if (kind === 'channel') {
+        await channelService.updateChannelTag(teamId, tagId, { name: trimmed })
+      } else {
+        await sourceService.updateSourceTag(teamId, tagId, { name: trimmed })
+      }
+
+      setEditingId(null)
+      onChanged()
+      toast.success('Тег переименован')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Не удалось переименовать тег')
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -90,22 +118,19 @@ export function ManageTagsDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Tag className="size-4" />
-            Управление тегами {kind === "channel" ? "каналов" : "источников"}
+            Управление тегами {kind === 'channel' ? 'каналов' : 'источников'}
           </DialogTitle>
-          <DialogDescription>
-            Создавайте, переименовывайте и удаляйте теги для группировки и фильтрации.
-          </DialogDescription>
+          <DialogDescription>Создавайте, переименовывайте и удаляйте теги для группировки и фильтрации.</DialogDescription>
         </DialogHeader>
 
-        {/* Add new tag */}
         <div className="flex items-center gap-2">
           <div className="flex gap-1">
-            {TAG_COLORS.map(c => (
+            {TAG_COLORS.map((color) => (
               <button
-                key={c}
-                onClick={() => setNewColor(c)}
-                className={`size-5 rounded-full ${TAG_DOT_COLORS[c]} transition-all ${
-                  newColor === c ? "ring-2 ring-offset-1 ring-gray-400 scale-110" : "hover:scale-110"
+                key={color}
+                onClick={() => setNewColor(color)}
+                className={`size-5 rounded-full ${TAG_DOT_COLORS[color]} transition-all ${
+                  newColor === color ? 'ring-2 ring-offset-1 ring-border scale-110' : 'hover:scale-110'
                 }`}
               />
             ))}
@@ -113,63 +138,56 @@ export function ManageTagsDialog({
           <Input
             placeholder="Новый тег..."
             value={newName}
-            onChange={e => setNewName(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleAdd()}
+            onChange={(event) => setNewName(event.target.value)}
+            onKeyDown={(event) => event.key === 'Enter' && void handleAdd()}
             className="h-8 text-sm flex-1"
+            disabled={isSubmitting}
           />
-          <Button size="sm" className="h-8" onClick={handleAdd} disabled={!newName.trim()}>
+          <Button size="sm" className="h-8" onClick={() => void handleAdd()} disabled={!newName.trim() || isSubmitting}>
             <Plus className="size-3.5" />
           </Button>
         </div>
 
-        {/* Tag list */}
         <div className="space-y-1 max-h-64 overflow-y-auto">
           {tags.length === 0 ? (
-            <div className="text-center py-6 text-gray-400 text-sm">
-              Тегов пока нет
-            </div>
+            <div className="py-6 text-center text-sm text-muted-foreground">Тегов пока нет</div>
           ) : (
-            tags.map(tag => (
-              <div
-                key={tag.id}
-                className="flex items-center justify-between gap-2 px-2 py-1.5 rounded-md hover:bg-gray-50 group"
-              >
+            tags.map((tag) => (
+              <div key={tag.id} className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-muted/60">
                 {editingId === tag.id ? (
                   <div className="flex items-center gap-1.5 flex-1">
                     <Input
                       value={editingName}
-                      onChange={e => setEditingName(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === "Enter") handleRename(tag.id);
-                        if (e.key === "Escape") setEditingId(null);
+                      onChange={(event) => setEditingName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') void handleRename(tag.id)
+                        if (event.key === 'Escape') setEditingId(null)
                       }}
                       className="h-7 text-sm flex-1"
                       autoFocus
+                      disabled={isSubmitting}
                     />
-                    <button
-                      onClick={() => handleRename(tag.id)}
-                      className="text-green-600 hover:text-green-700 p-0.5"
-                    >
+                    <button onClick={() => void handleRename(tag.id)} className="text-green-600 hover:text-green-700 p-0.5">
                       <Check className="size-3.5" />
                     </button>
-                    <button
-                      onClick={() => setEditingId(null)}
-                      className="text-gray-400 hover:text-gray-600 p-0.5"
-                    >
+                    <button onClick={() => setEditingId(null)} className="p-0.5 text-muted-foreground hover:text-foreground">
                       <X className="size-3.5" />
                     </button>
                   </div>
                 ) : (
                   <>
                     <button
-                      onClick={() => { setEditingId(tag.id); setEditingName(tag.name); }}
+                      onClick={() => {
+                        setEditingId(tag.id)
+                        setEditingName(tag.name)
+                      }}
                       className="flex-1 text-left"
                     >
                       <TagBadge name={tag.name} color={tag.color} size="md" />
                     </button>
                     <button
-                      onClick={() => handleDelete(tag.id, tag.name)}
-                      className="text-gray-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-0.5"
+                      onClick={() => void handleDelete(tag.id, tag.name)}
+                      className="p-0.5 text-muted-foreground opacity-0 transition-colors group-hover:opacity-100 hover:text-red-500"
                     >
                       <Trash2 className="size-3.5" />
                     </button>
@@ -181,5 +199,5 @@ export function ManageTagsDialog({
         </div>
       </DialogContent>
     </Dialog>
-  );
+  )
 }

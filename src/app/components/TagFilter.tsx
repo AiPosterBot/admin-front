@@ -2,7 +2,7 @@ import { Tag } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { Checkbox } from "./ui/checkbox";
 import { TagBadge, TAG_DOT_COLORS } from "./TagBadge";
-import type { TagColor } from "../data/mock-data";
+import type { TagColor } from "../types/domain";
 
 interface TagItem {
   id: string;
@@ -34,22 +34,22 @@ export function TagFilter({ tags, selectedTagIds, onChange, label = "Теги" }
     <Popover>
       <PopoverTrigger asChild>
         <button
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-sm transition-colors border ${
+          className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm transition-colors ${
             hasSelection
-              ? "border-blue-400 bg-blue-50 text-blue-700"
-              : "border-gray-200 text-gray-500 hover:text-gray-800 hover:bg-gray-50"
+              ? "border-primary/50 bg-primary/10 text-foreground"
+              : "border-border text-muted-foreground hover:bg-muted hover:text-foreground"
           }`}
         >
           <Tag className="size-3.5" />
           {label}
           {hasSelection && (
-            <span className="bg-blue-100 text-blue-700 text-[10px] rounded-full px-1.5 leading-4 tabular-nums">
+            <span className="rounded-full bg-primary/15 px-1.5 text-[10px] leading-4 tabular-nums text-primary">
               {selectedTagIds.length}
             </span>
           )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-56 p-2">
+      <PopoverContent align="start" className="w-56 border-border bg-popover p-2">
         <div className="space-y-0.5 max-h-60 overflow-y-auto">
           {tags.map(tag => {
             const checked = selectedTagIds.includes(tag.id);
@@ -57,7 +57,7 @@ export function TagFilter({ tags, selectedTagIds, onChange, label = "Теги" }
               <label
                 key={tag.id}
                 className={`flex items-center gap-2.5 px-2 py-1.5 rounded-md cursor-pointer transition-colors ${
-                  checked ? "bg-blue-50" : "hover:bg-gray-50"
+                  checked ? "bg-primary/10" : "hover:bg-muted"
                 }`}
               >
                 <Checkbox
@@ -66,16 +66,16 @@ export function TagFilter({ tags, selectedTagIds, onChange, label = "Теги" }
                   className="size-3.5"
                 />
                 <div className={`size-2 rounded-full ${TAG_DOT_COLORS[tag.color]}`} />
-                <span className="text-sm text-gray-700 truncate">{tag.name}</span>
+                <span className="truncate text-sm text-foreground">{tag.name}</span>
               </label>
             );
           })}
         </div>
         {hasSelection && (
-          <div className="border-t mt-1.5 pt-1.5">
+          <div className="mt-1.5 border-t border-border pt-1.5">
             <button
               onClick={() => onChange([])}
-              className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 transition-colors w-full text-left"
+              className="w-full px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:text-foreground"
             >
               Сбросить
             </button>

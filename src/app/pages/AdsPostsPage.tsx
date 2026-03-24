@@ -1,338 +1,274 @@
-import { useState, useMemo } from "react";
-import { useNavigate } from "react-router";
-import {
-  ArrowLeft,
-  FileText,
-  Trash2,
-  User,
-  Calendar,
-  Image as ImageIcon,
-  Megaphone,
-  Info,
-  Bot,
-  ChevronDown,
-  ChevronUp,
-} from "lucide-react";
-import { Button } from "../components/ui/button";
-import { Badge } from "../components/ui/badge";
-import { Input } from "../components/ui/input";
-import { Pagination, usePagination } from "../components/Pagination";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "../components/ui/alert-dialog";
-import { toast } from "sonner";
-import {
-  mockAdsPosts,
-  mockAdsCampaigns,
-  deleteAdsPost,
-} from "../data/mock-data";
-import { useTeam } from "../context/TeamContext";
-import * as teamService from "../services/teamService";
+import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router'
+import { ArrowLeft, Bot, Calendar, ChevronDown, ChevronUp, FileText, Image as ImageIcon, Info, Megaphone, Trash2, User } from 'lucide-react'
+import { toast } from 'sonner'
 
-const PAGE_SIZE = 10;
-const BOT_USERNAME = "ai_poster_bot";
+import { Pagination } from '../components/Pagination'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '../components/ui/alert-dialog'
+import { Badge } from '../components/ui/badge'
+import { Button } from '../components/ui/button'
+import { Input } from '../components/ui/input'
+import { useTeam } from '../context/TeamContext'
+import { deleteAdsPost, listTeamAdsCampaigns, listTeamAdsPosts } from '../services/adsService'
+import { getTelegramBotInfo } from '../services/channelService'
+import type { AdsCampaign, AdsPost } from '../types/domain'
 
-type UsageFilter = "all" | "used" | "unused";
+const PAGE_SIZE = 10
+
+type UsageFilter = 'all' | 'used' | 'unused'
+
+function toPlainText(value: string) {
+  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+}
 
 export function AdsPostsPage() {
-  const { currentTeamId } = useTeam();
-  const navigate = useNavigate();
-  const team = teamService.getTeamById(currentTeamId);
-  const [, setRefresh] = useState(0);
-  const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
-  const [usageFilter, setUsageFilter] = useState<UsageFilter>("all");
-  const [expandedPosts, setExpandedPosts] = useState<Set<string>>(new Set());
+  const { currentTeam, currentTeamId } = useTeam()
+  const navigate = useNavigate()
+  const [posts, setPosts] = useState<AdsPost[]>([])
+  const [campaigns, setCampaigns] = useState<AdsCampaign[]>([])
+  const [botUsername, setBotUsername] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [usageFilter, setUsageFilter] = useState<UsageFilter>('all')
+  const [page, setPage] = useState(1)
+  const [expandedPosts, setExpandedPosts] = useState<Set<string>>(new Set())
+  const [isLoading, setIsLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const allTeamPosts = useMemo(
-    () =>
-      mockAdsPosts
-        .filter((p) => p.teamId === currentTeamId)
-        .sort(
-          (a, b) =>
-            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-        ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [currentTeamId, mockAdsPosts.length]
-  );
-
-  // Counts for filter buttons
-  const usedCount = allTeamPosts.filter((p) => p.usedInCampaigns.length > 0).length;
-  const unusedCount =
-    allTeamPosts.filter((p) => p.usedInCampaigns.length === 0).length;
-
-  // Filtered posts
-  const teamPosts = useMemo(() => {
-    let filtered = allTeamPosts;
-
-    // Usage filter
-    if (usageFilter === "used") {
-      filtered = filtered.filter((p) => p.usedInCampaigns.length > 0);
-    } else if (usageFilter === "unused") {
-      filtered = filtered.filter((p) => p.usedInCampaigns.length === 0);
+  useEffect(() => {
+    if (!currentTeamId) {
+      setPosts([])
+      setCampaigns([])
+      setBotUsername(null)
+      setIsLoading(false)
+      return
     }
 
-    // Search
-    if (search.trim()) {
-      const q = search.toLowerCase().trim();
-      filtered = filtered.filter(
-        (p) =>
-          p.text.toLowerCase().includes(q) ||
-          p.createdByName.toLowerCase().includes(q)
-      );
-    }
+    let isMounted = true
 
-    return filtered;
-  }, [allTeamPosts, usageFilter, search]);
+    async function loadData() {
+      try {
+        setIsLoading(true)
+        setError(null)
 
-  const { totalPages, paginate, totalItems } = usePagination(
-    teamPosts,
-    PAGE_SIZE
-  );
-  const pagePosts = paginate(page);
+        const [postsResponse, campaignsResponse, botInfo] = await Promise.all([
+          listTeamAdsPosts(currentTeamId, { limit: 100 }),
+          listTeamAdsCampaigns(currentTeamId, { limit: 100 }),
+          getTelegramBotInfo(currentTeamId),
+        ])
 
-  const handleDelete = (postId: string) => {
-    deleteAdsPost(postId);
-    toast.success("Пост удалён");
-    setRefresh((r) => r + 1);
-  };
+        if (!isMounted) {
+          return
+        }
 
-  const toggleExpand = (postId: string) => {
-    setExpandedPosts((prev) => {
-      const next = new Set(prev);
-      if (next.has(postId)) {
-        next.delete(postId);
-      } else {
-        next.add(postId);
+        setPosts(postsResponse.data)
+        setCampaigns(campaignsResponse.data)
+        setBotUsername(botInfo.botUsername ?? null)
+      } catch (nextError) {
+        if (isMounted) {
+          setError(nextError instanceof Error ? nextError.message : 'Не удалось загрузить рекламные посты')
+        }
+      } finally {
+        if (isMounted) {
+          setIsLoading(false)
+        }
       }
-      return next;
-    });
-  };
+    }
 
-  // Reset page when filters change
-  const handleFilterChange = (filter: UsageFilter) => {
-    setUsageFilter(filter);
-    setPage(1);
-  };
+    void loadData()
 
-  const handleSearchChange = (value: string) => {
-    setSearch(value);
-    setPage(1);
-  };
+    return () => {
+      isMounted = false
+    }
+  }, [currentTeamId])
 
-  if (!team) {
+  const filteredPosts = useMemo(() => {
+    let nextPosts = [...posts]
+
+    if (usageFilter === 'used') {
+      nextPosts = nextPosts.filter((post) => post.usedInCampaigns.length > 0)
+    } else if (usageFilter === 'unused') {
+      nextPosts = nextPosts.filter((post) => post.usedInCampaigns.length === 0)
+    }
+
+    if (search.trim()) {
+      const query = search.trim().toLowerCase()
+      nextPosts = nextPosts.filter((post) => {
+        const text = toPlainText(post.text).toLowerCase()
+        return text.includes(query) || post.createdByName.toLowerCase().includes(query)
+      })
+    }
+
+    return nextPosts.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  }, [posts, usageFilter, search])
+
+  const totalPages = Math.max(1, Math.ceil(filteredPosts.length / PAGE_SIZE))
+  const pagePosts = filteredPosts.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+
+  useEffect(() => {
+    setPage((current) => Math.min(current, totalPages))
+  }, [totalPages])
+
+  const campaignsById = useMemo(() => new Map(campaigns.map((campaign) => [campaign.id, campaign])), [campaigns])
+  const usedCount = posts.filter((post) => post.usedInCampaigns.length > 0).length
+  const unusedCount = posts.filter((post) => post.usedInCampaigns.length === 0).length
+  const botLink = botUsername ? `https://t.me/${botUsername}` : null
+
+  if (!currentTeam) {
     return (
-      <div className="text-center py-12">
-        <h2 className="text-2xl font-bold text-gray-900 mb-2">
-          Команда не выбрана
-        </h2>
-        <p className="text-gray-600">Выберите команду в верхнем меню</p>
+      <div className="py-12 text-center">
+        <h2 className="mb-2 text-2xl font-bold text-gray-900 dark:text-gray-100">Команда не выбрана</h2>
+        <p className="text-gray-600 dark:text-gray-400">Выберите команду в верхнем меню</p>
       </div>
-    );
+    )
+  }
+
+  const handleDelete = async (postId: string) => {
+    try {
+      await deleteAdsPost(postId)
+      setPosts((current) => current.filter((post) => post.id !== postId))
+      toast.success('Пост удалён')
+    } catch (nextError) {
+      toast.error(nextError instanceof Error ? nextError.message : 'Не удалось удалить пост')
+    }
   }
 
   return (
     <div className="space-y-6">
-      {/* Back link */}
       <button
-        onClick={() => navigate("/ads")}
-        className="flex items-center gap-1.5 text-sm text-gray-500 hover:text-gray-800 transition-colors"
+        type="button"
+        onClick={() => navigate('/ads')}
+        className="flex items-center gap-1.5 text-sm text-gray-500 transition-colors hover:text-gray-800"
       >
         <ArrowLeft className="size-3.5" />
         Кампании
       </button>
 
-      {/* Header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Рекламные посты</h1>
-          <p className="text-gray-500 text-sm mt-0.5">
-            {team.name} · {allTeamPosts.length} постов
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Рекламные посты</h1>
+          <p className="mt-0.5 text-sm text-gray-500 dark:text-gray-400">
+            {currentTeam.name} · {posts.length} постов
           </p>
         </div>
       </div>
 
-      {/* How it works */}
-      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-500/30 dark:bg-blue-500/10">
         <div className="flex items-start gap-3">
-          <Info className="size-5 text-blue-600 flex-shrink-0 mt-0.5" />
+          <Info className="mt-0.5 size-5 shrink-0 text-blue-600 dark:text-blue-300" />
           <div className="space-y-2">
-            <div className="font-medium text-blue-900 text-sm">
-              Как создать рекламный пост
-            </div>
-            <ol className="space-y-1.5 text-sm text-blue-800">
+            <div className="text-sm font-medium text-blue-900 dark:text-blue-100">Как создать рекламный пост</div>
+            <ol className="space-y-1.5 text-sm text-blue-800 dark:text-blue-200">
               <li className="flex items-start gap-2">
-                <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">
-                  1
-                </span>
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-400/20 dark:text-blue-200">1</span>
                 <span>
-                  Откройте бота{" "}
-                  <a
-                    href={`https://t.me/${BOT_USERNAME}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 font-semibold underline underline-offset-2 hover:text-blue-600"
-                  >
-                    <Bot className="size-3.5" />
-                    @{BOT_USERNAME}
-                  </a>{" "}
-                  в Telegram
+                  Откройте бота{' '}
+                  {botLink ? (
+                    <a href={botLink} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 font-semibold underline underline-offset-2 hover:text-blue-600">
+                      <Bot className="size-3.5" />@{botUsername}
+                    </a>
+                  ) : (
+                    <span className="font-semibold">Telegram-бота</span>
+                  )}
                 </span>
               </li>
               <li className="flex items-start gap-2">
-                <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">
-                  2
-                </span>
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-400/20 dark:text-blue-200">2</span>
+                <span>Отправьте боту сообщение с нужным текстом и одним медиа-вложением, если оно требуется.</span>
+              </li>
+              <li className="flex items-start gap-2">
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-400/20 dark:text-blue-200">3</span>
                 <span>
-                  Отправьте боту сообщение с любым контентом (текст,
-                  форматирование, фото, видео)
+                  Ответьте на это сообщение командой <code className="rounded bg-blue-200 px-1.5 py-0.5 text-xs font-mono">/ads</code>.
                 </span>
               </li>
               <li className="flex items-start gap-2">
-                <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">
-                  3
-                </span>
-                <span>
-                  Ответьте на это сообщение командой{" "}
-                  <code className="bg-blue-200 px-1.5 py-0.5 rounded text-xs font-mono">
-                    /ads
-                  </code>
-                </span>
-              </li>
-              <li className="flex items-start gap-2">
-                <span className="size-5 rounded-full bg-blue-200 text-blue-800 flex items-center justify-center flex-shrink-0 text-xs font-bold mt-0.5">
-                  4
-                </span>
-                <span>
-                  Бот предложит выбрать команду — пост будет сохранён и появится
-                  здесь
-                </span>
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-blue-200 text-xs font-bold text-blue-800 dark:bg-blue-400/20 dark:text-blue-200">4</span>
+                <span>Если у вас несколько команд, бот покажет кнопки выбора. После этого пост появится на этой странице.</span>
               </li>
             </ol>
-            <p className="text-xs text-blue-600 mt-1">
-              Для привязки Telegram-аккаунта перейдите в{" "}
-              <button
-                onClick={() => navigate("/profile")}
-                className="underline underline-offset-2 hover:text-blue-800"
-              >
+            <p className="text-xs text-blue-600 dark:text-blue-300">
+              Для привязки Telegram-аккаунта перейдите в{' '}
+              <button type="button" onClick={() => navigate('/profile')} className="underline underline-offset-2 hover:text-blue-800">
                 Профиль
               </button>
+              .
             </p>
           </div>
         </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+      <div className="flex flex-col items-stretch gap-3 sm:flex-row sm:items-center">
         <Input
           placeholder="Поиск постов..."
           value={search}
-          onChange={(e) => handleSearchChange(e.target.value)}
+          onChange={(event) => {
+            setSearch(event.target.value)
+            setPage(1)
+          }}
           className="w-full sm:max-w-sm"
         />
         <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleFilterChange("all")}
-            className={
-              usageFilter === "all"
-                ? "bg-gray-100 text-gray-900"
-                : "text-gray-500"
-            }
-          >
-            Все ({allTeamPosts.length})
+          <Button variant="outline" size="sm" onClick={() => { setUsageFilter('all'); setPage(1) }} className={usageFilter === 'all' ? 'bg-gray-100 text-gray-900' : 'text-gray-500'}>
+            Все ({posts.length})
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleFilterChange("used")}
-            className={
-              usageFilter === "used"
-                ? "bg-gray-100 text-gray-900"
-                : "text-gray-500"
-            }
-          >
+          <Button variant="outline" size="sm" onClick={() => { setUsageFilter('used'); setPage(1) }} className={usageFilter === 'used' ? 'bg-gray-100 text-gray-900' : 'text-gray-500'}>
             Используются ({usedCount})
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleFilterChange("unused")}
-            className={
-              usageFilter === "unused"
-                ? "bg-gray-100 text-gray-900"
-                : "text-gray-500"
-            }
-          >
-            Не используются ({unusedCount})
+          <Button variant="outline" size="sm" onClick={() => { setUsageFilter('unused'); setPage(1) }} className={usageFilter === 'unused' ? 'bg-gray-100 text-gray-900' : 'text-gray-500'}>
+            Свободны ({unusedCount})
           </Button>
         </div>
       </div>
 
-      {/* Posts list */}
-      {teamPosts.length === 0 ? (
-        <div className="bg-white border rounded-lg text-center py-12 text-gray-500">
-          <FileText className="size-8 text-gray-300 mx-auto mb-3" />
-          <div className="font-medium">Рекламных постов пока нет</div>
-          <p className="text-sm mt-1">
-            Отправьте сообщение боту и ответьте командой /ads
-          </p>
+      {error ? <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">{error}</div> : null}
+
+      {isLoading ? (
+        <div className="rounded-lg border bg-white py-12 text-center text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400">Загрузка рекламных постов...</div>
+      ) : filteredPosts.length === 0 ? (
+        <div className="rounded-lg border bg-white py-12 text-center text-gray-500 dark:border-gray-800 dark:bg-gray-950 dark:text-gray-400">
+          <FileText className="mx-auto mb-3 size-8 text-gray-300 dark:text-gray-600" />
+          <div className="font-medium">{posts.length === 0 ? 'Рекламных постов пока нет' : 'Ничего не найдено'}</div>
+          <p className="mt-1 text-sm">Сохраните сообщение через бота и оно появится здесь.</p>
         </div>
       ) : (
-        <div className="bg-white border rounded-lg divide-y">
+        <div className="divide-y rounded-lg border bg-white dark:border-gray-800 dark:bg-gray-950 dark:divide-gray-800">
           {pagePosts.map((post) => {
-            const campaignCount = post.usedInCampaigns.length;
-            const campaigns = mockAdsCampaigns.filter((c) =>
-              post.usedInCampaigns.includes(c.id)
-            );
+            const plainText = toPlainText(post.text)
+            const isExpanded = expandedPosts.has(post.id)
+            const campaignCount = post.usedInCampaigns.length
+            const relatedCampaigns = post.usedInCampaigns.map((campaignId) => campaignsById.get(campaignId)).filter(Boolean) as AdsCampaign[]
 
             return (
-              <div key={post.id} className="p-4 hover:bg-gray-50 transition-colors">
+              <div key={post.id} className="p-4 transition-colors hover:bg-gray-50 dark:hover:bg-gray-900">
                 <div className="flex gap-4">
-                  {/* Media thumbnail */}
-                  {post.mediaUrl && (
-                    <img
-                      src={post.mediaUrl}
-                      alt=""
-                      className="w-20 h-20 object-cover rounded-lg flex-shrink-0"
-                    />
-                  )}
+                  {post.mediaUrl && <img src={post.mediaUrl} alt="" className="h-20 w-20 shrink-0 rounded-lg object-cover" />}
 
-                  {/* Content */}
-                  <div className="flex-1 min-w-0">
-                    <p
-                      className={`text-sm text-gray-800 whitespace-pre-wrap ${
-                        expandedPosts.has(post.id) ? "" : "line-clamp-3"
-                      }`}
-                    >
-                      {post.text}
+                  <div className="min-w-0 flex-1">
+                    <p className={`whitespace-pre-wrap text-sm text-gray-800 dark:text-gray-200 ${isExpanded ? '' : 'line-clamp-3'}`}>
+                      {plainText || 'Медиа без текста'}
                     </p>
 
-                    {/* Expanded media */}
-                    {expandedPosts.has(post.id) && post.mediaUrl && (
-                      <img
-                        src={post.mediaUrl}
-                        alt=""
-                        className="max-w-md rounded-lg mt-3"
-                      />
+                    {isExpanded && post.mediaUrl && (
+                      <img src={post.mediaUrl} alt="" className="mt-3 max-w-md rounded-lg" />
                     )}
 
-                    {/* Expand/collapse toggle */}
-                    {post.text.length > 150 && (
+                    {plainText.length > 150 && (
                       <button
-                        onClick={() => toggleExpand(post.id)}
-                        className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 mt-1.5"
+                        type="button"
+                        onClick={() =>
+                          setExpandedPosts((current) => {
+                            const next = new Set(current)
+                            if (next.has(post.id)) {
+                              next.delete(post.id)
+                            } else {
+                              next.add(post.id)
+                            }
+                            return next
+                          })
+                        }
+                        className="mt-1.5 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700 dark:text-blue-300 dark:hover:text-blue-200"
                       >
-                        {expandedPosts.has(post.id) ? (
+                        {isExpanded ? (
                           <>
                             <ChevronUp className="size-3" />
                             Свернуть
@@ -346,78 +282,61 @@ export function AdsPostsPage() {
                       </button>
                     )}
 
-                    <div className="flex items-center gap-3 mt-2 flex-wrap">
-                      <span className="flex items-center gap-1 text-xs text-gray-400">
+                    <div className="mt-2 flex flex-wrap items-center gap-3">
+                      <span className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
                         <User className="size-3" />
                         {post.createdByName}
                       </span>
-                      <span className="flex items-center gap-1 text-xs text-gray-400">
+                      <span className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
                         <Calendar className="size-3" />
-                        {new Date(post.createdAt).toLocaleString("ru-RU", {
-                          day: "numeric",
-                          month: "short",
-                          year: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
+                        {new Date(post.createdAt).toLocaleString('ru-RU', {
+                          day: 'numeric',
+                          month: 'short',
+                          year: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
                         })}
                       </span>
                       {post.mediaUrl && (
-                        <span className="flex items-center gap-1 text-xs text-gray-400">
+                        <span className="flex items-center gap-1 text-xs text-gray-400 dark:text-gray-500">
                           <ImageIcon className="size-3" />
                           Медиа
                         </span>
                       )}
                       {campaignCount > 0 ? (
-                        <span className="flex items-center gap-1">
-                          <Badge
-                            variant="secondary"
-                            className="text-xs gap-1"
-                          >
+                        <span className="flex flex-wrap items-center gap-1">
+                          <Badge variant="secondary" className="gap-1 text-xs">
                             <Megaphone className="size-3" />
-                            {campaignCount} кампан.
+                            {campaignCount} камп.
                           </Badge>
-                          {campaigns.map((c) => (
+                          {relatedCampaigns.map((campaign) => (
                             <button
-                              key={c.id}
-                              onClick={() => navigate(`/ads/${c.id}`)}
-                              className="text-xs text-blue-600 hover:text-blue-700 underline underline-offset-2"
+                              key={campaign.id}
+                              type="button"
+                              onClick={() => navigate(`/ads/${campaign.id}`)}
+                              className="text-xs text-blue-600 underline underline-offset-2 hover:text-blue-700"
                             >
-                              {c.name}
+                              {campaign.name}
                             </button>
                           ))}
                         </span>
                       ) : (
-                        <Badge
-                          variant="outline"
-                          className="text-xs text-gray-400"
-                        >
+                        <Badge variant="outline" className="text-xs text-gray-400">
                           Не использован
                         </Badge>
                       )}
                     </div>
                   </div>
 
-                  {/* Delete */}
-                  <div className="flex-shrink-0">
+                  <div className="shrink-0">
                     {campaignCount > 0 ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        disabled
-                        className="text-gray-300 cursor-not-allowed"
-                        title="Нельзя удалить: используется в кампании"
-                      >
+                      <Button variant="ghost" size="sm" disabled className="cursor-not-allowed text-gray-300" title="Нельзя удалить: пост используется в кампании">
                         <Trash2 className="size-4" />
                       </Button>
                     ) : (
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="text-gray-400 hover:text-red-600"
-                            title="Удалить пост"
-                          >
+                          <Button variant="ghost" size="sm" className="text-gray-400 hover:text-red-600" title="Удалить пост">
                             <Trash2 className="size-4" />
                           </Button>
                         </AlertDialogTrigger>
@@ -425,15 +344,12 @@ export function AdsPostsPage() {
                           <AlertDialogHeader>
                             <AlertDialogTitle>Удалить рекламный пост?</AlertDialogTitle>
                             <AlertDialogDescription>
-                              Пост будет удалён безвозвратно. Это действие нельзя отменить.
+                              Пост будет удалён без возможности восстановления.
                             </AlertDialogDescription>
                           </AlertDialogHeader>
                           <AlertDialogFooter>
-                            <AlertDialogCancel>Отмена</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => handleDelete(post.id)}
-                              className="bg-red-600 hover:bg-red-700"
-                            >
+                            <AlertDialogCancel>Назад</AlertDialogCancel>
+                            <AlertDialogAction onClick={() => void handleDelete(post.id)} className="bg-red-600 hover:bg-red-700">
                               Удалить
                             </AlertDialogAction>
                           </AlertDialogFooter>
@@ -443,18 +359,12 @@ export function AdsPostsPage() {
                   </div>
                 </div>
               </div>
-            );
+            )
           })}
         </div>
       )}
 
-      <Pagination
-        currentPage={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        totalItems={totalItems}
-        pageSize={PAGE_SIZE}
-      />
+      <Pagination currentPage={page} totalPages={totalPages} onPageChange={setPage} totalItems={filteredPosts.length} pageSize={PAGE_SIZE} />
     </div>
-  );
+  )
 }
