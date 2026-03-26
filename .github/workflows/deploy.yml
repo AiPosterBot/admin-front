@@ -1,0 +1,31 @@
+name: Admin Front Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          script: |
+            set -e
+            cd /opt/ai-poster/backend && git fetch --all && git checkout main && git reset --hard origin/main
+            cd /opt/ai-poster/admin-front && git fetch --all && git checkout main && git reset --hard origin/main
+            cd /opt/ai-poster/tg-user-bot && git fetch --all && git checkout main && git reset --hard origin/main
+            cd /opt/ai-poster/backend/deploy
+            chmod +x deploy.sh
+            ./deploy.sh

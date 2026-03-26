@@ -246,19 +246,19 @@ const WEBSITE_STAGE_ORDER = ['analyze_list', 'open_samples', 'generate_config', 
 const RSS_ARTICLE_STAGE_ORDER = ['analyze_list', 'open_samples', 'generate_config', 'dry_run', 'verdict'] as const
 
 const WEBSITE_STAGE_LABELS: Record<(typeof WEBSITE_STAGE_ORDER)[number], string> = {
-  analyze_list: 'Р С’Р Р…Р В°Р В»Р С‘Р В· РЎРѓР С—Р С‘РЎРѓР С”Р В° Р СР В°РЎвЂљР ВµРЎР‚Р С‘Р В°Р В»Р С•Р Р†',
-  open_samples: 'Р С›РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљР С‘Р Вµ Р С—РЎР‚Р С‘Р СР ВµРЎР‚Р С•Р Р†',
-  generate_config: 'Р вЂњР ВµР Р…Р ВµРЎР‚Р В°РЎвЂ Р С‘РЎРЏ Р С”Р С•Р Р…РЎвЂћР С‘Р С–РЎС“РЎР‚Р В°РЎвЂ Р С‘Р С‘',
-  dry_run: 'Р СџРЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В° dry-run',
-  verdict: 'Р В¤Р С‘Р Р…Р В°Р В»РЎРЉР Р…РЎвЂ№Р в„– Р Р†Р ВµРЎР‚Р Т‘Р С‘Р С”РЎвЂљ',
+  analyze_list: 'Анализ списка материалов',
+  open_samples: 'Открытие примеров',
+  generate_config: 'Генерация конфигурации',
+  dry_run: 'Проверка dry-run',
+  verdict: 'Финальный вердикт',
 }
 
 const RSS_ARTICLE_STAGE_LABELS: Record<(typeof RSS_ARTICLE_STAGE_ORDER)[number], string> = {
-  analyze_list: 'Р С’Р Р…Р В°Р В»Р С‘Р В· RSS Р С‘ РЎРѓРЎРѓРЎвЂ№Р В»Р С•Р С”',
-  open_samples: 'Р С›РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљР С‘Р Вµ HTML-РЎРѓРЎвЂљР В°РЎвЂљР ВµР в„–',
-  generate_config: 'Р вЂњР ВµР Р…Р ВµРЎР‚Р В°РЎвЂ Р С‘РЎРЏ article-Р С”Р С•Р Р…РЎвЂћР С‘Р С–Р В°',
-  dry_run: 'Р СћР ВµРЎРѓРЎвЂљР С•Р Р†РЎвЂ№Р в„– Р С—Р В°РЎР‚РЎРѓР С‘Р Р…Р С– РЎРѓРЎвЂљР В°РЎвЂљР ВµР в„–',
-  verdict: 'Р В¤Р С‘Р Р…Р В°Р В»РЎРЉР Р…Р В°РЎРЏ Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С”Р В°',
+  analyze_list: 'Анализ RSS и ссылок',
+  open_samples: 'Открытие HTML-статей',
+  generate_config: 'Генерация article-конфига',
+  dry_run: 'Тестовый парсинг статей',
+  verdict: 'Финальная проверка',
 }
 
 function deriveWebsiteOnboardingStages(
@@ -659,7 +659,7 @@ export async function checkTelegramSource(teamId: string, url: string): Promise<
 export async function checkTelegramSourceAccess(sourceId: string, teamId: string): Promise<ServiceResult<Source['accessStatus']>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -668,7 +668,7 @@ export async function checkTelegramSourceAccess(sourceId: string, teamId: string
     upsertSource(teamId, nextSource)
     return ok(response.accessStatus)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—РЎР‚Р С•Р Р†Р ВµРЎР‚Р С‘РЎвЂљРЎРЉ Р Т‘Р С•РЎРѓРЎвЂљРЎС“Р С— telegram-Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”Р В°')
+    return err(error instanceof Error ? error.message : 'Не удалось проверить доступ telegram-источника')
   }
 }
 
@@ -694,7 +694,7 @@ export async function startWebsiteOnboarding(teamId: string, input: { name: stri
     return ok(response)
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘РЎвЂљРЎРЉ onboarding РЎРѓР В°Р в„–РЎвЂљР В°'),
+      getLimitAwareErrorMessage(error, 'Не удалось запустить onboarding сайта'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
@@ -752,7 +752,7 @@ export async function startRssArticleOnboarding(
     return ok(response)
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘РЎвЂљРЎРЉ article-onboarding'),
+      getLimitAwareErrorMessage(error, 'Не удалось запустить article-onboarding'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
@@ -816,7 +816,7 @@ export async function applyWebsiteOnboarding(teamId: string, input: { jobId: str
     })
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—РЎР‚Р С‘Р СР ВµР Р…Р С‘РЎвЂљРЎРЉ onboarding Р Т‘Р В»РЎРЏ website-Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”Р В°'),
+      getLimitAwareErrorMessage(error, 'Не удалось применить onboarding для website-источника'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
@@ -899,7 +899,7 @@ export async function pauseSource(sourceId: string, teamId: string): Promise<Ser
     upsertSource(teamId, source)
     return ok(source)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С•РЎРѓРЎвЂљР В°Р Р…Р С•Р Р†Р С‘РЎвЂљРЎРЉ Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”')
+    return err(error instanceof Error ? error.message : 'Не удалось остановить источник')
   }
 }
 
@@ -929,7 +929,7 @@ export async function resumeSource(sourceId: string, teamId: string): Promise<Se
     upsertSource(teamId, source)
     return ok(source)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р Р†Р С”Р В»РЎР‹РЎвЂЎР С‘РЎвЂљРЎРЉ Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”')
+    return err(error instanceof Error ? error.message : 'Не удалось включить источник')
   }
 }
 
@@ -945,14 +945,14 @@ export async function deleteSource(sourceId: string, teamId: string): Promise<Se
     linkedChannelIdsBySourceCache.delete(sourceId)
     return ok(undefined)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ РЎС“Р Т‘Р В°Р В»Р С‘РЎвЂљРЎРЉ Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”')
+    return err(error instanceof Error ? error.message : 'Не удалось удалить источник')
   }
 }
 
 export async function scanSourceNow(sourceId: string, teamId: string): Promise<ServiceResult<Job>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -963,14 +963,14 @@ export async function scanSourceNow(sourceId: string, teamId: string): Promise<S
     })
     return ok(await getJob(response.jobId))
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘РЎвЂљРЎРЉ РЎРѓР С”Р В°Р Р…Р С‘РЎР‚Р С•Р Р†Р В°Р Р…Р С‘Р Вµ Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”Р В°')
+    return err(error instanceof Error ? error.message : 'Не удалось запустить сканирование источника')
   }
 }
 
 export async function reonboardSource(sourceId: string, teamId: string): Promise<ServiceResult<Job>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -982,7 +982,7 @@ export async function reonboardSource(sourceId: string, teamId: string): Promise
     return ok(await getJob(response.jobId))
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘РЎвЂљРЎРЉ Р С—Р С•Р Р†РЎвЂљР С•РЎР‚Р Р…РЎвЂ№Р в„– onboarding РЎРѓР В°Р в„–РЎвЂљР В°'),
+      getLimitAwareErrorMessage(error, 'Не удалось запустить повторный onboarding сайта'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
@@ -992,7 +992,7 @@ export async function reonboardSource(sourceId: string, teamId: string): Promise
 export async function reonboardRssArticle(sourceId: string, teamId: string): Promise<ServiceResult<Job>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -1004,7 +1004,7 @@ export async function reonboardRssArticle(sourceId: string, teamId: string): Pro
     return ok(await getJob(response.jobId))
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘РЎвЂљРЎРЉ Р С—Р С•Р Р†РЎвЂљР С•РЎР‚Р Р…РЎвЂ№Р в„– onboarding RSS-РЎРѓРЎвЂљР В°РЎвЂљРЎРЉР С‘'),
+      getLimitAwareErrorMessage(error, 'Не удалось запустить повторный onboarding RSS-статьи'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
@@ -1014,7 +1014,7 @@ export async function reonboardRssArticle(sourceId: string, teamId: string): Pro
 export async function applySourceConfig(sourceId: string, teamId: string, jobId: string, config: AgentConfig): Promise<ServiceResult<void>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -1039,7 +1039,7 @@ export async function applySourceConfig(sourceId: string, teamId: string, jobId:
 
     return ok(undefined)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—РЎР‚Р С‘Р СР ВµР Р…Р С‘РЎвЂљРЎРЉ Р С”Р С•Р Р…РЎвЂћР С‘Р С– РЎРѓР В°Р в„–РЎвЂљР В°')
+    return err(error instanceof Error ? error.message : 'Не удалось применить конфиг сайта')
   }
 }
 
@@ -1051,7 +1051,7 @@ export async function applySourceRssConfig(
 ): Promise<ServiceResult<void>> {
   const source = getSourceByIdSync(sourceId)
   if (!source || source.teamId !== teamId) {
-    return err('Р ВРЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…Р Вµ Р Р…Р В°Р в„–Р Т‘Р ВµР Р…')
+    return err('Источник не найден')
   }
 
   try {
@@ -1075,7 +1075,7 @@ export async function applySourceRssConfig(
 
     return ok(undefined)
   } catch (error) {
-    return err(error instanceof Error ? error.message : 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—РЎР‚Р С‘Р СР ВµР Р…Р С‘РЎвЂљРЎРЉ Р С”Р С•Р Р…РЎвЂћР С‘Р С– RSS-РЎРѓРЎвЂљР В°РЎвЂљРЎРЉР С‘')
+    return err(error instanceof Error ? error.message : 'Не удалось применить конфиг RSS-статьи')
   }
 }
 
@@ -1090,12 +1090,12 @@ export interface CreateSourceData {
 
 export async function createSource(teamId: string, data: CreateSourceData): Promise<ServiceResult<Source>> {
   if (!teamId) {
-    return err('Р СњР Вµ Р Р†РЎвЂ№Р В±РЎР‚Р В°Р Р…Р В° Р С”Р С•Р СР В°Р Р…Р Т‘Р В°')
+    return err('Не выбрана команда')
   }
 
   const existingSource = readCachedTeamSources(teamId).find((source) => source.url === data.url)
   if (existingSource) {
-    return err(`URL РЎС“Р В¶Р Вµ Р Т‘Р С•Р В±Р В°Р Р†Р В»Р ВµР Р… Р С”Р В°Р С” "${existingSource.name}"`, 'DUPLICATE_URL')
+    return err(`URL уже добавлен как "${existingSource.name}"`, 'DUPLICATE_URL')
   }
 
   try {
@@ -1121,10 +1121,10 @@ export async function createSource(teamId: string, data: CreateSourceData): Prom
       return ok(source)
     }
   } catch (error) {
-    return err(getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ РЎРѓР С•Р В·Р Т‘Р В°РЎвЂљРЎРЉ Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”'), getLimitAwareErrorCode(error), getLimitAwareErrorMeta(error))
+    return err(getLimitAwareErrorMessage(error, 'Не удалось создать источник'), getLimitAwareErrorCode(error), getLimitAwareErrorMeta(error))
   }
 
-  return err('Website-Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С” Р Р…РЎС“Р В¶Р Р…Р С• РЎРѓР С•Р В·Р Т‘Р В°Р Р†Р В°РЎвЂљРЎРЉ РЎвЂЎР ВµРЎР‚Р ВµР В· onboarding Р В°Р С–Р ВµР Р…РЎвЂљР В°')
+  return err('Website-источник нужно создавать через onboarding агента')
 }
 
 export async function applyRssArticleOnboarding(
@@ -1151,7 +1151,7 @@ export async function applyRssArticleOnboarding(
     })
   } catch (error) {
     return err(
-      getLimitAwareErrorMessage(error, 'Р СњР Вµ РЎС“Р Т‘Р В°Р В»Р С•РЎРѓРЎРЉ Р С—РЎР‚Р С‘Р СР ВµР Р…Р С‘РЎвЂљРЎРЉ article-Р С”Р С•Р Р…РЎвЂћР С‘Р С– RSS-Р С‘РЎРѓРЎвЂљР С•РЎвЂЎР Р…Р С‘Р С”Р В°'),
+      getLimitAwareErrorMessage(error, 'Не удалось применить article-конфиг RSS-источника'),
       getLimitAwareErrorCode(error),
       getLimitAwareErrorMeta(error),
     )
